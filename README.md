@@ -1,4 +1,4 @@
-> Perforizon (work in progress): performance fork of Horizon. Access test from Claude Code.
+> Perforizon (work in progress): performance fork of Horizon.
 
 <p align="center">
   <img src="docs/media/banner.webp" alt="The Horizon website: the game you know, rebuilt in Rust" width="100%">
