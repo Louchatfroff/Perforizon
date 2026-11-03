@@ -13,14 +13,16 @@ use std::sync::Arc;
 /// The dialog: a new instance (`editing` None) or one being changed. Its name and group are the
 /// text fields `Field::InstanceName` and `Field::InstanceGroup`.
 pub(super) struct InstanceDialog {
-    editing: Option<String>,
+    pub(super) editing: Option<String>,
     /// A new instance copies the selected one's worlds, options and packs.
-    copy: bool,
-    icon: Option<Icon>,
+    pub(super) copy: bool,
+    pub(super) icon: Option<Icon>,
     pub(super) error: Option<String>,
-    busy: bool,
+    pub(super) busy: bool,
     /// Horizon, or the Java game it plays.
     pub(super) java: new_instance::JavaChoice,
+    /// The Horizon version it keeps (`Instance::version`); None follows the launcher's.
+    pub(super) pin: Option<String>,
 }
 
 /// The instances and their icons as images, kept between frames.
@@ -82,7 +84,7 @@ impl Launcher {
         self.native_update = None;
         self.settings.instance =
             (instance.kind != InstanceKind::Default).then(|| instance.id.clone());
-        self.settings.save();
+        self.save_settings();
     }
 
     /// The sidebar's instances: those without a group, then each group under its name.
@@ -174,6 +176,7 @@ impl Launcher {
         self.servers.focus_soon = Some(Field::InstanceName);
         self.instances.dialog = Some(InstanceDialog {
             icon: editing.as_ref().and_then(|i| i.icon.clone()),
+            pin: editing.as_ref().and_then(|i| i.version.clone()),
             editing: editing.map(|i| i.id),
             copy: false,
             error: None,
@@ -181,6 +184,20 @@ impl Launcher {
             java: Default::default(),
         });
         self.servers.text(Field::InstanceVersion).set(String::new());
+    }
+
+    /// Opens the dialog for a copy of the selected instance, named after it.
+    pub(super) fn start_copy(&mut self) {
+        let Some(name) = self.selected_instance().map(|i| i.name.clone()) else {
+            return;
+        };
+        self.open_instance_dialog(None);
+        self.servers
+            .text(Field::InstanceName)
+            .set(format!("{name} copy"));
+        if let Some(d) = &mut self.instances.dialog {
+            d.copy = true;
+        }
     }
 
     /// Escape closes the dialog. Whether it did.
@@ -202,8 +219,18 @@ impl Launcher {
             return;
         };
         let icon = d.icon.clone();
+        let pin = d.pin.clone();
         let editing = d.editing.clone();
         let copy = selected.filter(|_| d.copy);
+        // The Horizon version is Horizon's instances' alone: a Java one plays its own game.
+        let plays_horizon = match &editing {
+            Some(id) => self
+                .instances
+                .list
+                .iter()
+                .any(|i| &i.id == id && i.java.is_none()),
+            None => d.java.kind == new_instance::NewKind::Horizon,
+        };
         // A new Java instance: what it plays, and its name when none is typed.
         let java = (editing.is_none() && d.java.kind != new_instance::NewKind::Horizon)
             .then(|| d.java.clone());
@@ -243,6 +270,9 @@ impl Launcher {
                 m.name = Some(name);
                 m.group = group;
                 m.icon = icon;
+                if plays_horizon {
+                    m.version = pin;
+                }
             })?;
             Ok(instance)
         });
@@ -447,11 +477,7 @@ impl Launcher {
     pub(super) fn instance_row(&mut self, n: usize, cx: &mut Context<Self>) -> Option<Div> {
         let t = self.theme;
         let instance = self.selected_instance()?.clone();
-        let (home, edit, name) = (
-            instance.home.clone(),
-            instance.clone(),
-            instance.name.clone(),
-        );
+        let (home, edit) = (instance.home.clone(), instance.clone());
         // Under the name, wrapping: six actions don't fit beside it at the window's narrowest.
         let actions = div()
             .flex()
@@ -470,13 +496,7 @@ impl Launcher {
             .child(
                 button("instance-copy", "Copy…", Kind::Ghost, &t).on_click(cx.listener(
                     move |this, _: &ClickEvent, _, cx| {
-                        this.open_instance_dialog(None);
-                        this.servers
-                            .text(Field::InstanceName)
-                            .set(format!("{name} copy"));
-                        if let Some(d) = &mut this.instances.dialog {
-                            d.copy = true;
-                        }
+                        this.start_copy();
                         cx.notify();
                     },
                 )),
@@ -616,17 +636,20 @@ impl Launcher {
         )
     }
 
-    fn delete_instance(&mut self, id: &str) {
+    pub(super) fn delete_instance(&mut self, id: &str) {
         if self.client.is_some() || self.starting_client.is_some() {
             return;
         }
-        match instances::delete(id) {
-            Ok(_) => {
+        match instances::delete_with_selection(id) {
+            Ok((_, saved)) => {
                 self.instances.confirm_delete = None;
+                self.instances.delete_error = None;
                 // Play starts Horizon again; the window's copy of the settings says so too.
                 if self.settings.instance.as_deref() == Some(id) {
                     self.settings.instance = None;
-                    self.settings.save();
+                    self.save_settings();
+                } else if let Err(error) = saved {
+                    self.settings_save_error = Some(error);
                 }
                 self.reload_instances();
             }
@@ -650,7 +673,7 @@ pub(super) fn played_line(instance: &Instance) -> String {
 }
 
 /// A Java instance's line in the sidebar: "Java 1.21.4", and its loader ("· Fabric 0.16.9").
-fn java_line(j: &instances::JavaGame) -> String {
+pub(super) fn java_line(j: &instances::JavaGame) -> String {
     match &j.loader {
         Some(l) => format!("Java {} · {} {}", j.minecraft, l.kind.name(), l.version),
         None => format!("Java {}", j.minecraft),

@@ -60,6 +60,9 @@ file = "material.wgsl"
 files = ["pbr.wgsl"]       # optional, on any stage: WGSL put after `shared`, before this stage's file
 fog = false                # optional: the pack fogs its surfaces itself (Horizon does when absent or true)
 
+[vertex]                   # needs [material]: where corners of terrain are drawn, for the world and the shadow map; shares the material's module
+file = "vertex.wgsl"
+
 [weather]                  # the colour of rain and snow streaks
 file = "weather.wgsl"
 
@@ -86,6 +89,8 @@ step = 0.05
 [[materials]]              # 1024 at most: MaterialInput.material, the first entry that matches
 id = 10                    # 1 to 65535; 0 is a sprite no entry names
 sprites = ["block/*_leaves"]   # sprite names, any number of * each
+blocks = ["oak_log", "grass_block:snowy=true"]   # optional: the sprites these blocks' models draw with, where no entry's sprites name them
+translucent = false        # optional: this id's sprites draw in the translucent pass, clear texels and all
 
 [[pages]]                  # optional: the options page's layout, the first the one it opens on
 id = "main"
@@ -109,6 +114,11 @@ wrap = "repeat"            # optional: repeat (default) or clamp
 color = [0.3, 0.7, 1.0]    # each channel 0 to 4
 blocks = ["soul_*"]        # block names, any number of * each
 
+[[particle_lights]]        # 32 at most: these particles join the frame's coloured lights
+particles = ["firefly"]    # names, `firefly` or `minecraft:firefly`; the first entry naming one wins
+color = [0.8, 0.9, 0.4]    # each channel 0 to 1; the particle's alpha is its intensity
+reach = 4.0                # blocks, 0.25 to 16; the 16 nearest lights shine, read by MaterialInput.colored_light
+
 [[tags]]                   # 32 at most: bit i of MaterialInput.tags is the i-th tag
 id = "glass"
 sprites = ["block/glass", "block/*_stained_glass"]   # sprite names, at most one * each
@@ -118,7 +128,20 @@ gpu_ms = 1.5               # optional: the GPU time the pack aims to add (0 to 1
 
 [reflection]               # optional, needs [material]: when the water mirror (`reflection`) is drawn
 option = "reflections"     # optional: drawn while this option is not 0 (else whenever the material reads it)
+
+[displacement]             # optional, needs [material]: relief as geometry near the camera
+distance = 12.0            # optional: how far, in blocks (4 to 32); eases out over the last quarter
+cells = 16                 # optional: grid cells along a face's side (4 to 64)
+option = "displacement_on" # optional: a bool option that turns it on (else always on)
+cells_option = "cells"     # optional: a choice option of cell counts that replaces `cells`
+steps_option = "steps"     # optional: a bool option: each cell a flat step with walls while it's on
 ```
+
+Under `[displacement]` the faces of solid terrain whose textures have LabPBR heights (the normal map's alpha) are
+cut into a grid near the camera, and each corner moves along the face's normal by the material stage's
+`fn displacement(input: DisplacementInput) -> f32`: relief that is geometry, which hides itself, writes its
+depth and is lit where it is. `MaterialInput.displaced` says how much of the relief a point already got that way,
+so a parallax effect fades out where the geometry took over.
 
 An option's `override` has the type of its kind: `bool`, `f32`, `i32`, or `u32` for a choice (the index of the
 value). The pack holds only the manifest, the `.wgsl` files it names (each used, UTF-8, 256 KiB at most),
@@ -140,10 +163,17 @@ pack exist ([stability.md](stability.md)).
 ## Not there yet
 
 Option values other than the defaults (the three stages run, with hot reload), then the overlay and lighting
-stages.
+stages. `[displacement]`'s relief doesn't reach the shadow map yet: the flat faces cast there.
 
 ## Changelog
 
+- 2026-11-03: API 0.1 (additions): `[displacement]` draws: near the camera the faces with LabPBR relief are a
+  grid moved by `displacement`, and `MaterialInput.displaced` says how much of it a point has.
+- 2026-11-03: API 0.1 (additions): the manifest's `[displacement]`, the material stage's
+  `fn displacement(input: DisplacementInput) -> f32` and `MaterialInput.displaced`.
+- 2026-11-02: API 0.1 (additions): with dynamic lights on, held and dropped items light
+  `MaterialInput.colored_light` in their block's `[[lights]]` colour.
+- 2026-11-02: API 0.1 (additions): `[[particle_lights]]` and `MaterialInput.colored_light`.
 - 2026-11-01: API 0.1 (additions): `[[materials]]` and `MaterialInput.material`, an id by sprite,
   and `[shadow] solid_materials`.
 - 2026-11-01: API 0.1 (additions): entities cast into `shadow_map`, the player's own model in first person too, and the round
@@ -196,3 +226,7 @@ stages.
 - 2026-11-01: API 0.1 (additions): `[material] fog`.
 - 2026-11-01: API 0.1 (additions): the material stage reads the resource packs' LabPBR maps (`_n`, `_s`): `block_pbr_maps`, `block_normal_map`, `block_specular_map`, their `_level` forms and `block_pbr_size`. The maps load only while a native pack is picked: without one they cost nothing, and the first pick reloads the resources once.
 - 2026-11-01: API 0.1 (additions): `[[post]] output` and `scale`, targets of a pack's own at the world's size, half or a quarter of it.
+- 2026-11-01: API 0.1 (additions): the material stage's `block_texture`, `block_texture_level`, `block_texture_size` and `block_texture_lod`, the surface's own sprite anywhere on it. The LabPBR `_level` functions now count the block texture's mip levels, the same footprint where a map is smaller.
+- 2026-11-01: API 0.1 (additions): the material stage's `set_surface` and the post stage's `surface_at` and `scene_surface`: a normal, a smoothness and a value of the pack's own per pixel of solid terrain. Only a material stage that calls `set_surface` pays for the target.
+- 2026-11-01: API 0.1 (additions): `[[materials]] blocks`, ids by block, and `translucent`, moving an id's sprites into the translucent pass. `sprites` may be left out when `blocks` is there.
+- 2026-11-01: API 0.1 (additions): the `[vertex]` stage, `fn vertex(input: VertexInput) -> vec3<f32>`: waving plants and rolling water, in the world and the shadow map.

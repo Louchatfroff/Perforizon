@@ -82,7 +82,7 @@ impl Launcher {
                         .when(chosen, |d| d.child(div().size(px(6.)).bg(t.accent)))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             this.settings.language = choice;
-                            this.settings.save();
+                            this.save_settings();
                             i18n::set(this.settings.language());
                             this.language_menu = false;
                             cx.notify();

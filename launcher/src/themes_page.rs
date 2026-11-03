@@ -8,7 +8,7 @@ impl Launcher {
 
     pub(super) fn set_palette(&mut self, palette: &'static Palette, window: &mut Window) {
         self.settings.palette = palette.name.to_string();
-        self.settings.save();
+        let _ = self.settings.save();
         titlebar::apply_appearance(
             window,
             if palette.dark {

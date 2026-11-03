@@ -1,9 +1,9 @@
-# Horizon's mark and icons
+# Perforizon's mark and icons
 
-**The mark.** An H whose crossbar is the horizon: the line runs edge to edge in Horizon's violet,
-the stems above it in full strength and their reflection below at a third. It is drawn on whole
-units of a 16-unit grid, so it is sharp at 16 px and holds at 1024 px. `docs/design-system.md`
-places it in the design system; `candidates/` keeps the two alternatives that were shown with it.
+**The mark.** A forward-leaning P with a pointed tail, wrapped by a thin orbit ring and two four-point
+sparkles, in grayscale: near-black (`#111111`) with a mid-grey orbit on light backgrounds, off-white
+(`#f5f5f5`) with a light-grey orbit on dark ones. The app icon is the dark-background mark on a near-black
+rounded tile; the 16 and 32 px sizes drop the sparkles. The README does not use the mark.
 
 ## Masters (edit these)
 
@@ -13,11 +13,10 @@ places it in the design system; `candidates/` keeps the two alternatives that we
 | `icon-macos.svg` | the same tile on Apple's 1024 grid (824 px tile, 185 px corners, transparent margin) |
 | `avatar.svg` | full-bleed square for services that round or crop the image (GitHub, Discord) |
 | `mark.svg`, `mark-dark.svg` | the mark alone, for light and for dark backgrounds |
-| `social/card.html` | the GitHub social preview, as a page |
 
 ## Generated (don't edit)
 
-`cargo run -p xtask -- icons` (needs `rsvg-convert` from librsvg) renders the masters into:
+`cargo run -p xtask -- icons` (needs `rsvg-convert` from librsvg) renders the masters into the files below (the committed ones were rendered with resvg and Pillow from the same masters):
 
 | Output | Used by |
 |--------|---------|
@@ -29,38 +28,3 @@ places it in the design system; `candidates/` keeps the two alternatives that we
 | `web/favicon.svg`, `web/favicon-32.png`, `web/apple-touch-icon.png` | the website (its `npm run assets` copies them into its `public/`) |
 | `icon-1024.png`, `icon-macos-1024.png` | previews, store listings |
 | `social/github-avatar-500.png` | GitHub: the organisation or account avatar |
-
-The page in `social/` is a screenshot, at their exact size, with Playwright, from the repository's root:
-
-```sh
-d=$(mktemp -d) && npm install --prefix "$d" playwright && npx --prefix "$d" playwright install chromium
-NODE_PATH="$d/node_modules" node -e 'const {chromium}=require("playwright");(async()=>{const b=await chromium.launch();for(const[f,w,h,o]of[["card",1280,640,"github-social-1280x640"]]){const p=await b.newPage({viewport:{width:w,height:h}});await p.goto("file://"+require("path").resolve("docs/media/brand/social/"+f+".html"));await p.waitForTimeout(300);await p.screenshot({path:"docs/media/brand/social/"+o+".png"})}await b.close()})()'
-```
-
-## The README banner
-
-`docs/media/banner.webp` (1600x600) is the website's hero, a screenshot of playhorizon.dev in its
-dark theme. The navbar, the hero's buttons, its version line and its lede are hidden first, so the
-banner carries no launcher version and no harness count (the README's prose owns the count), and
-nothing in it goes stale. The crop starts 56 px above the kicker and ends at the hero's bottom
-edge. With Playwright, from the repository's root:
-
-```sh
-d=$(mktemp -d) && npm install --prefix "$d" playwright && npx --prefix "$d" playwright install chromium
-NODE_PATH="$d/node_modules" node -e 'const {chromium}=require("playwright");(async()=>{const b=await chromium.launch();const p=await b.newPage({viewport:{width:1600,height:1000}});await p.goto("https://playhorizon.dev/",{waitUntil:"networkidle"});await p.click(".theme-toggle");await p.waitForTimeout(1200);await p.evaluate(()=>{for(const s of ["header",".hero-actions",".download-meta",".lede"]){const e=document.querySelector(s);if(e)e.style.display="none"}});await p.waitForTimeout(400);await p.screenshot({path:"docs/media/banner.webp",clip:{x:0,y:136,width:1600,height:600}});await b.close()})()'
-```
-
-## Drawn in code
-
-| Where | What |
-|-------|------|
-| `crates/horizon-client-render/src/title_edition.rs` | the R, U and S of "RUST EDITION" under the classic title screen's logo: Horizon's own glyphs (MIT), rectangles in that file. The banner is rebuilt at load time from the player's own `textures/gui/title/edition.png` (its "EDITION" and "T" carried over, its shades sampled), so no Mojang pixels are in the repository; a resource pack's banner is left as drawn |
-
-## Uploading (the accounts are Ludovic's)
-
-- **GitHub avatar**: github.com/settings/profile (or the organisation's settings), *Edit* the
-  picture, upload `social/github-avatar-500.png`.
-- **GitHub social preview**: the repository's *Settings › General › Social preview › Edit*,
-  upload `social/github-social-1280x640.png`.
-- **Discord** (the server icon and banner, Kira's avatar): they live in the private kira repo since 2026-10-15
-  (`assets/`, its README's "Discord brand assets"): this repo holds only the game, the launcher and the website.

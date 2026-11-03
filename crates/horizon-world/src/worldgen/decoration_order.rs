@@ -34,6 +34,8 @@ use std::collections::VecDeque;
 
 #[derive(Default)]
 pub struct DecorationOrder {
+    /// Looked up 24 times per chunk `blocked` is asked about, each time the
+    /// streamer schedules decoration: a fast hasher, not SipHash.
     rank: FxHashMap<(i32, i32), u64>,
     next: u64,
 }
