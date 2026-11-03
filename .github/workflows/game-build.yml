@@ -96,8 +96,8 @@ jobs:
             server_asset: horizon-server-linux-x86_64.tar.gz
           - name: windows
             os: windows-latest
-            dir: horizon-windows-x64
-            asset: horizon-windows-x64.zip
+            dir: Perforizon-windows-x64
+            asset: Perforizon-windows-x64.zip
             exe: .exe
             # The C runtime linked in, so the game runs without the Visual C++ redistributable.
             rustflags: -C target-feature=+crt-static

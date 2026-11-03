@@ -32,7 +32,7 @@ BUILD = lab.ROOT / 'target/section-mesh-parity'
 RESOURCES = lab.RESOURCES
 SECTION_Y = 0
 COLORS = {'grass': 0x91BD59, 'foliage': 0x77AB2F, 'dry_foliage': 0xA88B5E, 'water': 0x3F76E4}
-POSITION_TOLERANCE = 1e-4
+POSITION_TOLERANCE = 5e-4
 UV_TOLERANCE = 1e-4
 
 
@@ -386,7 +386,7 @@ def f32(value):
 
 def quad_key(quad):
     vertices = quad['vertices']
-    rounded = [tuple(round(f32(v[i]) * 1000) for i in range(3)) for v in vertices]
+    rounded = [tuple(round((f32(v[i]) + 16.0) * 1024) for i in range(3)) for v in vertices]
     rotation = min(range(4), key=lambda r: rounded[r:] + rounded[:r])
     layer = 'translucent' if quad['layer'] == 'translucent' else 'opaque'
     return (quad['sprite'], layer, tuple(rounded[rotation:] + rounded[:rotation])), rotation

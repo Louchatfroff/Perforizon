@@ -2,4 +2,6 @@
 # key per line. The launcher and horizon-server build these in and refuse a download no key here signed.
 # The private keys exist only as the RELEASE_SIGNING_KEY secret(s) of the repository's `release` environment.
 # Changing this file needs Ludovic's review (.github/CODEOWNERS).
+# The second key is Perforizon's (docs/perforizon-install.md, "Signing a release"); its private half is kept by the fork's owner outside the repository.
 MU4oiIQcCxkZvbwSjjXs7SySCuM6ywRQ3nGaJYZG0gw=
+5xJqlI7SIM9Ri10iC6mJn777iLADN2ZF9qiEg+Ok4CM=

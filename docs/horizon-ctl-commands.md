@@ -137,5 +137,10 @@ Every command `horizon-ctl` takes, its MCP tool in `horizon-ctl mcp` (the launch
 | `sleep SECONDS` | CLI only | Wait (in scripts) | none |
 | `mcp` | CLI only | Serve the Model Context Protocol on stdin/stdout, one tool per command | none |
 | `bench SECONDS` | `bench` | Reset frame stats, wait, reply with the summary | `seconds` (number, required): how long to measure |
+| `graphics KEY VALUE` | CLI only | Set a graphics option now (a key of horizon-graphics.txt) | `key` (string, required): the option's key<br>`value` (string, required): its value |
+| `pvp KEY [VALUE]` | CLI only | Read or set a PvP option now (a key of horizon-pvp.txt) | `key` (string, required): the option's key<br>`value` (string): its new value |
+| `graphics-save` | CLI only | Save the options to disk | none |
+| `perf-mode on\|off` | CLI only | Measure without a frame cap, VSync or idle limit; off restores them | `state` (on, off, required): on or off |
+| `autotune [FPS [PASSES]] [--precise] [--cancel]` | CLI only | Try the performance settings, keep the best, lower the resolution scale until FPS is met | `fps` (number): the frame rate to aim for<br>`passes` (number): with --precise: passes per candidate (default 3)<br>`--precise` (boolean): run the slow benchmark-scene mode<br>`--cancel` (boolean): stop a running precise auto-tune |
 | `stats [reset]` | `stats` | Frame-time summary since the last reset | `reset` (boolean): start counting again |
 | `fly X1 Y1 Z1 X2 Y2 Z2 SECONDS [PITCH [raw]]` | CLI only | Fly the camera along a line, then reply with the frame summary | none |

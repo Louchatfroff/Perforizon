@@ -105,7 +105,7 @@ pub fn put_helpers_behind() {
 /// the process, or, where nice runs out (a game started under nice 10 or
 /// more), the idle class, which runs the thread only when no ordinary thread
 /// wants its core. A tick or a frame then gets a core when it starts instead
-/// of waiting behind them. Nothing elsewhere. Whether the OS took it.
+/// of waiting behind them. Below-normal priority on Windows, nothing elsewhere. Whether the OS took it.
 pub fn behind_server() -> bool {
     HELPERS_BEHIND.load(Ordering::Relaxed) && behind()
 }
@@ -126,7 +126,15 @@ fn behind() -> bool {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
+#[cfg(windows)]
+fn behind() -> bool {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+    };
+    unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL) != 0 }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", windows)))]
 fn behind() -> bool {
     false
 }

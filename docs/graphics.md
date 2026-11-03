@@ -11,8 +11,6 @@ Vanilla's own settings (render distance, FOV, framerate, VSync, GUI scale, smoot
 
 Every row has a one-line description and its cost in frame time (none, low, medium, high, or saves time for culling that makes frames faster), and applies at once, except worker threads, which apply at the next start. A preset sets the quality settings together; changing one of them turns it into Custom. Display preferences (FOV, framerate, VSync, GUI scale, fullscreen, present mode, pacing) leave the preset as it is.
 
-![Video Settings, with Horizon's buttons at the top](media/settings-simple.png)
-![Advanced Graphics](media/settings-advanced.png)
 
 | Group | Setting | Stored in |
 | --- | --- | --- |

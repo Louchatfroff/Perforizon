@@ -1,26 +1,58 @@
 <p align="center">
-  <img src="docs/media/banner.webp" alt="The Horizon website: the game you know, rebuilt in Rust" width="100%">
+  <img src="docs/media/banner.webp" alt="Perforizon: Horizon, tuned for frame rate and input latency" width="100%">
 </p>
 
 <p align="center">
-  <a href="https://github.com/horizon-rust/horizon/actions/workflows/ci.yml"><img src="https://github.com/horizon-rust/horizon/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <img src="https://img.shields.io/badge/Minecraft-Java%2026.3-5D9C3F" alt="Minecraft Java 26.3">
   <img src="https://img.shields.io/badge/Rust-stable-B7410E?logo=rust&logoColor=white" alt="Rust">
   <img src="https://img.shields.io/badge/vanilla%20parity-100%25-F0795A" alt="Vanilla parity 100%">
-  <a href="#project-status"><img src="https://img.shields.io/badge/player--visible%20gaps-833%20open-F0795A" alt="Player-visible gaps open"></a>
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-2A2470" alt="Linux, macOS and Windows">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-3B2F7E" alt="MIT license"></a>
 </p>
 
 <p align="center">
-  <a href="https://playhorizon.dev"><b>Website</b></a> ·
+  <a href="https://github.com/Louchatfroff/Perforizon"><b>GitHub</b></a> ·
   <a href="#download"><b>Download</b></a> ·
   <a href="https://playhorizon.dev/docs/"><b>Documentation</b></a> ·
-  <a href="https://github.com/horizon-rust/horizon/releases"><b>Release notes</b></a> ·
+  <a href="https://github.com/Louchatfroff/Perforizon/releases"><b>Releases</b></a> ·
   <a href="ROADMAP.md"><b>Roadmap</b></a> ·
   <a href="#project-status"><b>Project status</b></a> ·
   <a href="#contributing"><b>Contributing</b></a>
 </p>
+
+# Perforizon
+
+A performance fork of Horizon: same worlds, same world generation (bit-identical), faster frames and lower input latency. At render distance 32 on an RTX 4060 Ti it averages +18% to +48% fps over stock Horizon with default settings (up to +145% once the auto-tune enables Far LOD), and has better 1% and 0.1% lows in every benchmark scene ([benchmarks](docs/perforizon-benchmarks.md)). It adds an in-game **Auto-tune**, an Optimization Mode (Performance or 100% parity), more antialiasing modes and a PvP module.
+
+- [Install and use the Auto-tune](docs/perforizon-autotune.md)
+- [Patch notes](docs/perforizon-patchnotes.md) · [Technical details](docs/perforizon-technical.md) · [Installing and releasing](docs/perforizon-install.md)
+
+Recorded in the game at 1920x1080, render distance 16, VSync off: the frame counter and the input-to-screen latency counter (`latencyHud`) are in the corner, with the small direction panel of the PvP module at top left.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/media/game-village.webp" alt="A river valley seen from above in Perforizon, with the frame counter and the input-to-screen latency in the corner"></td>
+    <td width="50%"><img src="docs/media/game-forest.webp" alt="A forest in Perforizon, with the frame counter and the input-to-screen latency in the corner"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><img src="docs/media/game-ocean.webp" alt="An ocean coast in Perforizon, with the frame counter and the input-to-screen latency in the corner"></td>
+  </tr>
+</table>
+
+The launcher has a terminal look: grayscale by default, with other palettes (Tokyo Night, Catppuccin and more) on `^p` or in Settings.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/media/launcher-home.png" alt="The launcher's Home page in the default grayscale palette"></td>
+    <td width="50%"><img src="docs/media/launcher-tokyo-night.png" alt="The launcher's Home page in the Tokyo Night palette"></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/media/launcher-mods.png" alt="The launcher's Mods page"></td>
+    <td width="50%"><img src="docs/media/launcher-catppuccin-mocha.png" alt="The launcher's Settings page in the Catppuccin Mocha palette"></td>
+  </tr>
+</table>
+
+Everything below is Horizon's README, kept for reference; the Perforizon fork is at <https://github.com/Louchatfroff/Perforizon>.
 
 # Horizon
 
@@ -34,13 +66,6 @@ Get **the Horizon launcher** from [playhorizon.dev](https://playhorizon.dev) or 
 
 **You need** a Microsoft account that owns Java Edition ([why](docs/microsoft-account.md)) and a GPU with Vulkan or OpenGL 3.3 (Linux), Vulkan or DirectX 12 (Windows), or a Mac (Apple Silicon, or Intel from the next Nightly). An existing Minecraft install (official launcher, Prism, MultiMC...) is reused; without one, Play downloads 26.3 from Mojang for your account. Step by step: [Install and first launch](https://playhorizon.dev/docs/install).
 
-<table>
-  <tr>
-    <td width="50%"><img src="docs/media/launcher-play.webp" alt="The launcher's Home page: the selected instance ready to play, the version picker, Join a friend and the instance's tabs"></td>
-    <td width="50%"><img src="docs/media/launcher-settings.webp" alt="The launcher's Settings page: Microsoft account, offline name, updates, appearance and accent colour"></td>
-  </tr>
-</table>
-
 ## What works today
 
 - **The game:** vanilla world generation, mobs, villagers, raids, redstone, every command, the HUD and the recipe book, on vanilla saves. Worlds from 1.8 to 26.2 are upgraded. [Status](#project-status).
@@ -48,22 +73,6 @@ Get **the Horizon launcher** from [playhorizon.dev](https://playhorizon.dev) or 
 - **Packs:** resource packs, and data packs with functions, predicates, item modifiers and world generation.
 - **Multiplayer:** invite friends with a code, Open to LAN, join servers (online mode included). [Multiplayer](https://playhorizon.dev/docs/multiplayer).
 - **Mods:** content mods (blocks, items, data) and native Rust mods, built by the launcher with nothing to install. Java mod jars do not run. [Mods](https://playhorizon.dev/docs/mods).
-
-In the Rust client, with vanilla assets and no mods or shaders:
-
-<table>
-  <tr>
-    <td colspan="2"><img src="docs/media/sunset.webp" alt="Sunset over a savanna river valley and a plains village"></td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="docs/media/survival.webp" alt="Survival at dusk: a zombie walks up, with the hotbar, health, hunger and experience"></td>
-    <td width="50%"><img src="docs/media/settings.webp" alt="Vanilla's Video Settings screen with Horizon's own buttons at the top: Horizon Graphics and Advanced Graphics"></td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="docs/media/village.webp" alt="A plains village among savanna hills, with farms, villagers and an iron golem"></td>
-    <td width="50%"><img src="docs/media/nether.webp" alt="A crimson forest in the Nether with a zombified piglin"></td>
-  </tr>
-</table>
 
 ## Host a server
 

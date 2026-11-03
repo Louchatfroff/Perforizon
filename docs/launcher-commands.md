@@ -109,7 +109,7 @@ MCP: `notes`.
 
 ## `horizon-launcher links`
 
-Show the Discord, sponsor and website links.
+Show the project link.
 
     horizon-launcher links
 
@@ -210,11 +210,11 @@ MCP: `account_skin`.
 
 ## `horizon-launcher settings`
 
-Show the launcher's settings, or set one (the Settings page): selected-version TAG, minecraft-dir PATH, server-dir PATH ("default" resets a folder), install-new-versions on|off, prune-old-versions on|off (delete old versions after an install, keeping the selected one, the ones instances use and the newest few), keep-versions N (how many of the newest to keep; "default" is 2), opening-animation on|off, proxy http://host:port ("default" removes it), while-playing stay|minimize|hide (what the window does while the game runs), language system|en|fr|ru|de|zh|es|uk|pl (the window's language; system follows the computer's), accent violet|blue|teal|green|amber|red|pink, background PATH (a picture behind Home; "default" shows Horizon's landscape), native-profile fast|release (the Cargo profile native mods build with: fast is incremental, release is slower to build and slightly faster to play).
+Show the launcher's settings, or set one (the Settings page): selected-version TAG, minecraft-dir PATH, server-dir PATH ("default" resets a folder), install-new-versions on|off, prune-old-versions on|off (delete old versions after an install, keeping the selected one, the ones instances use and the newest few), keep-versions N (how many of the newest to keep; "default" is 2), opening-animation on|off, proxy http://host:port ("default" removes it), while-playing stay|minimize|hide (what the window does while the game runs), language system|en|fr|ru|de|zh|es|uk|pl (the window's language; system follows the computer's), palette NAME (grayscale, tokyo-night, tokyo-night-storm, catppuccin-latte|frappe|macchiato|mocha, gruvbox-dark, nord, dracula, rose-pine, solarized-dark|light, one-dark, kanagawa, everforest; "default" is grayscale), native-profile fast|release (the Cargo profile native mods build with: fast is incremental, release is slower to build and slightly faster to play).
 
     horizon-launcher settings [KEY] [VALUE]
 
-- `KEY` (selected-version, minecraft-dir, server-dir, install-new-versions, prune-old-versions, keep-versions, opening-animation, proxy, while-playing, language, accent, background, native-profile)
+- `KEY` (selected-version, minecraft-dir, server-dir, install-new-versions, prune-old-versions, keep-versions, opening-animation, proxy, while-playing, language, palette, native-profile)
 - `VALUE`: The new value (with KEY)
 
 MCP: `settings`.
