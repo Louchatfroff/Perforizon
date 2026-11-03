@@ -187,7 +187,17 @@ pub struct ConnWriter {
     encrypt: Option<Cfb8>,
     pub threshold: Option<usize>,
     counters: Arc<Counters>,
+    pending: Vec<u8>,
+    batching: bool,
 }
+static COALESCING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn set_coalescing(on: bool) {
+    COALESCING.store(on, Ordering::Relaxed);
+}
+pub fn coalescing() -> bool {
+    COALESCING.load(Ordering::Relaxed)
+}
+const BATCH_LIMIT: usize = 16 * 1024;
 /// `InetAddress.getByName` under Java's default `java.net.preferIPv6Addresses=false`: IPv4
 /// addresses first, whatever order the system resolver gives (macOS lists IPv6 first). Vanilla
 /// connects to that first address only; the rest stay here as fallbacks.
@@ -300,6 +310,8 @@ impl Connection {
                 encrypt: None,
                 threshold: None,
                 counters,
+                pending: Vec::new(),
+                batching: false,
             },
         })
     }
@@ -409,11 +421,36 @@ impl ConnWriter {
         if let Some(c) = &mut self.encrypt {
             c.encrypt(&mut framed);
         }
-        self.stream.write_all(&framed)?;
         self.counters.sent.fetch_add(1, Ordering::Relaxed);
         self.counters
             .bytes_out
             .fetch_add(framed.len() as i64, Ordering::Relaxed);
+        if self.batching {
+            self.pending.extend_from_slice(&framed);
+            if self.pending.len() >= BATCH_LIMIT {
+                return self.flush();
+            }
+            return Ok(());
+        }
+        self.stream.write_all(&framed)?;
+        Ok(())
+    }
+    /// Hold small packets until [`Self::flush`] and write them as one segment train;
+    /// turning it off writes what is held. The bytes on the wire are the same.
+    pub fn set_batching(&mut self, on: bool) -> Result<()> {
+        self.batching = on && !matches!(self.stream, Stream::Memory(_));
+        if self.batching { Ok(()) } else { self.flush() }
+    }
+    pub fn send_now(&mut self, body: &[u8]) -> Result<()> {
+        self.send(body)?;
+        self.flush()
+    }
+    pub fn flush(&mut self) -> Result<()> {
+        if !self.pending.is_empty() {
+            let result = self.stream.write_all(&self.pending);
+            self.pending.clear();
+            result?;
+        }
         Ok(())
     }
     pub fn shutdown(&self) {
@@ -665,5 +702,184 @@ mod tests {
         let (id, payload) = c.recv().unwrap();
         assert_eq!((id, payload.as_slice()), (3, &b"after"[..]));
         server.join().unwrap();
+    }
+    #[test]
+    fn batched_packets_wait_for_the_flush_and_arrive_in_order() {
+        let (a, b) = Pipe::pair();
+        let (_unused, mut writer) = Connection::local(a).split();
+        let mut reader = Connection::local(b);
+        reader
+            .reader
+            .set_read_timeout(Some(Duration::from_millis(30)))
+            .unwrap();
+        writer.set_batching(true).unwrap();
+        writer.batching = true;
+        writer.send(&[1, 0xAA]).unwrap();
+        writer.send(&[2, 0xBB, 0xCC]).unwrap();
+        assert!(reader.recv().unwrap_err().is_timed_out());
+        writer.flush().unwrap();
+        assert_eq!(reader.recv().unwrap(), (1, vec![0xAA]));
+        assert_eq!(reader.recv().unwrap(), (2, vec![0xBB, 0xCC]));
+        writer.send(&[3]).unwrap();
+        writer.set_batching(false).unwrap();
+        assert_eq!(reader.recv().unwrap(), (3, vec![]));
+        writer.send(&[4]).unwrap();
+        assert_eq!(reader.recv().unwrap(), (4, vec![]));
+    }
+
+    #[test]
+    fn send_now_reaches_the_peer_while_batching_is_on() {
+        let (a, b) = Pipe::pair();
+        let (_unused, mut writer) = Connection::local(a).split();
+        let mut reader = Connection::local(b);
+        writer.batching = true;
+        writer.send(&[1, 0xAA]).unwrap();
+        writer.send_now(&[2, 0xBB]).unwrap();
+        assert_eq!(reader.recv().unwrap(), (1, vec![0xAA]));
+        assert_eq!(reader.recv().unwrap(), (2, vec![0xBB]));
+    }
+
+    #[test]
+    fn a_full_batch_is_written_without_a_flush() {
+        let (a, b) = Pipe::pair();
+        let (_unused, mut writer) = Connection::local(a).split();
+        let mut reader = Connection::local(b);
+        writer.batching = true;
+        let mut big = vec![7];
+        big.resize(BATCH_LIMIT + 10, 0x55);
+        writer.send(&big).unwrap();
+        let (id, payload) = reader.recv().unwrap();
+        assert_eq!((id, payload.len()), (7, BATCH_LIMIT + 9));
+    }
+
+    #[test]
+    fn batched_packets_keep_the_encrypted_stream_and_compression_intact() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut c = Connection::from_stream(stream).unwrap();
+            c.enable_encryption(&[3; 16]);
+            c.set_compression(32);
+            c.writer.set_batching(true).unwrap();
+            c.send(&[1, 2]).unwrap();
+            let mut long = vec![9];
+            long.resize(300, 4);
+            c.send(&long).unwrap();
+            c.send(&[5]).unwrap();
+            c.writer.flush().unwrap();
+            c
+        });
+        let mut c = Connection::connect("127.0.0.1", port, Duration::from_secs(5)).unwrap();
+        c.enable_encryption(&[3; 16]);
+        c.set_compression(32);
+        assert_eq!(c.recv().unwrap(), (1, vec![2]));
+        let (id, payload) = c.recv().unwrap();
+        assert_eq!((id, payload.len(), payload[0]), (9, 299, 4));
+        assert_eq!(c.recv().unwrap(), (5, vec![]));
+        let _keep = server.join().unwrap();
+    }
+
+    #[test]
+    fn every_tcp_connection_sets_nodelay() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let c = Connection::connect("127.0.0.1", port, Duration::from_secs(5)).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let s = Connection::from_stream(stream).unwrap();
+        for conn in [&c, &s] {
+            match &conn.reader.stream {
+                Stream::Tcp(t) => assert!(t.nodelay().unwrap()),
+                Stream::Memory(_) => panic!("not a socket"),
+            }
+        }
+    }
+
+    fn burst_round_trip(client: TcpStream, mut server: TcpStream, rounds: usize) -> Duration {
+        let echo = std::thread::spawn(move || {
+            let mut got = [0u8; 2];
+            for _ in 0..rounds {
+                server.read_exact(&mut got).unwrap();
+                server.write_all(&[1]).unwrap();
+            }
+        });
+        let mut client = client;
+        let start = Instant::now();
+        for _ in 0..rounds {
+            client.write_all(&[7]).unwrap();
+            client.write_all(&[8]).unwrap();
+            client.read_exact(&mut [0u8; 1]).unwrap();
+        }
+        let took = start.elapsed();
+        echo.join().unwrap();
+        took / rounds as u32
+    }
+
+    fn socket_pair(nodelay: bool) -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        for s in [&client, &server] {
+            s.set_nodelay(nodelay).unwrap();
+        }
+        (client, server)
+    }
+
+    /// A player action is a few small packets in a row (swing, use, tick end). With Nagle on,
+    /// the second waits for the peer's delayed ACK; with TCP_NODELAY it leaves at once.
+    #[test]
+    fn nodelay_round_trip_of_a_small_packet_burst_stays_fast() {
+        let (c, s) = socket_pair(false);
+        let nagle = burst_round_trip(c, s, 5);
+        let (c, s) = socket_pair(true);
+        let nodelay = burst_round_trip(c, s, 5);
+        eprintln!("burst round trip: nagle {nagle:?}, nodelay {nodelay:?}");
+        assert!(nodelay < Duration::from_millis(20), "{nodelay:?}");
+    }
+    fn action_round_trip(
+        mut client: Connection,
+        mut server: Connection,
+        batched: bool,
+    ) -> Duration {
+        let echo = std::thread::spawn(move || {
+            for _ in 0..200 {
+                for expected in [1, 2, 3] {
+                    assert_eq!(server.recv().unwrap().0, expected);
+                }
+                server.send(&[9]).unwrap();
+            }
+        });
+        client.writer.set_batching(batched).unwrap();
+        let mut times = Vec::new();
+        for _ in 0..200 {
+            let start = Instant::now();
+            client.send(&[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+            client.send(&[2, 0]).unwrap();
+            client.send(&[3]).unwrap();
+            client.writer.flush().unwrap();
+            assert_eq!(client.recv().unwrap().0, 9);
+            times.push(start.elapsed());
+        }
+        echo.join().unwrap();
+        times.sort();
+        times[times.len() / 2]
+    }
+
+    /// A block break or an attack is three small packets (action, swing, tick end) answered by
+    /// the server: through memory (the integrated server) and through a socket (LAN, dedicated).
+    #[test]
+    fn loopback_round_trip_of_a_player_action_is_the_same_with_and_without_batching() {
+        for batched in [false, true] {
+            let (a, b) = Pipe::pair();
+            let memory = action_round_trip(Connection::local(a), Connection::local(b), batched);
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let client = Connection::connect("127.0.0.1", port, Duration::from_secs(5)).unwrap();
+            let server = Connection::from_stream(listener.accept().unwrap().0).unwrap();
+            let socket = action_round_trip(client, server, batched);
+            eprintln!("action round trip, batched {batched}: memory {memory:?}, socket {socket:?}");
+            assert!(memory < Duration::from_millis(5), "{memory:?}");
+            assert!(socket < Duration::from_millis(5), "{socket:?}");
+        }
     }
 }

@@ -40,18 +40,20 @@ fn horizon_shadow_vertex(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<
     return out;
 }
 @vertex fn horizon_shadow_vs(
-    @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
-    @location(2) layer: u32, @location(3) color: vec4<f32>,
+    @location(0) position: vec4<u32>, @location(1) uv: vec2<u32>,
+    @location(2) mode: u32, @location(3) color: vec4<f32>,
     @location(5) origin: vec4<f32>) -> HorizonShadowOut {
-    return horizon_shadow_vertex(position + origin.xyz, horizon_terrain_terrain_uv(uv, origin.w), layer, color);
+    return horizon_shadow_vertex(horizon_terrain_terrain_position(position, mode) + origin.xyz,
+        horizon_terrain_terrain_uv(uv, origin.w, mode), position.w, color);
 }
 @vertex fn horizon_shadow_vs_flat(
     @builtin(vertex_index) index: u32,
-    @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>, @location(2) layer: u32,
+    @location(0) position: vec4<u32>, @location(1) uv: vec2<u32>, @location(2) mode: u32,
     @location(3) color: vec4<f32>
 ) -> HorizonShadowOut {
     let origin = horizon_terrain_slot_origins[horizon_terrain_block_slots[index >> 8u]];
-    return horizon_shadow_vertex(position + origin.xyz, horizon_terrain_terrain_uv(uv, origin.w), layer, color);
+    return horizon_shadow_vertex(horizon_terrain_terrain_position(position, mode) + origin.xyz,
+        horizon_terrain_terrain_uv(uv, origin.w, mode), position.w, color);
 }
 @fragment fn horizon_shadow_fs(in: HorizonShadowOut) {
     // Bit 15 of the layer marks opaque leaves (forceOpaque): no alpha cutout.
@@ -385,7 +387,7 @@ fn entity_pipeline(
             targets: &[],
         }),
         multiview_mask: None,
-        cache: None,
+        cache: crate::gfx::pipeline_cache::get(),
     })
 }
 
@@ -537,7 +539,7 @@ impl NativeShadow {
                     targets: if translucent { &color_target } else { &[] },
                 }),
                 multiview_mask: None,
-                cache: None,
+                cache: crate::gfx::pipeline_cache::get(),
             })
         };
         let instanced = layout(None);

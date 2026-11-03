@@ -225,12 +225,32 @@ pub fn block_strategy() -> Strategy {
     Strategy::blocks(BLOCK_BITS.load(std::sync::atomic::Ordering::Relaxed))
 }
 
+static FREEING: std::sync::OnceLock<std::sync::mpsc::Sender<Box<dyn Send>>> =
+    std::sync::OnceLock::new();
+
 /// Frees `columns` (`count` of them) on a short-lived thread of its own
 /// when there are many: a teleport or a dimension change drops a few
 /// thousand columns at once, and freeing their sections took the frame
-/// 15-20 ms. A few are freed here.
+/// 15-20 ms. A few go to one long-lived freeing thread: a busy allocator made
+/// even four columns stall the frame for tens of milliseconds.
 pub fn free_columns<T: Send + 'static>(columns: T, count: usize) {
+    if count == 0 {
+        return;
+    }
     if count < 64 {
+        let sender = FREEING.get_or_init(|| {
+            let (sender, receiver) = std::sync::mpsc::channel::<Box<dyn Send>>();
+            let _ = std::thread::Builder::new()
+                .name("Chunk freeing".into())
+                .spawn(move || {
+                    horizon_threads::behind_server();
+                    while let Ok(freed) = receiver.recv() {
+                        drop(freed);
+                    }
+                });
+            sender
+        });
+        let _ = sender.send(Box::new(columns));
         return;
     }
     // Should the thread not start, the closure drops `columns` here.
@@ -660,6 +680,35 @@ pub struct ChunkExtras {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct DropsOn(std::sync::mpsc::Sender<std::thread::ThreadId>);
+
+    impl Drop for DropsOn {
+        fn drop(&mut self) {
+            let _ = self.0.send(std::thread::current().id());
+        }
+    }
+
+    #[test]
+    fn a_few_columns_are_freed_off_the_calling_thread() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        free_columns(DropsOn(sender), 4);
+        let freed_on = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("freed");
+        assert_ne!(freed_on, std::thread::current().id());
+    }
+
+    #[test]
+    fn no_columns_are_left_to_the_caller() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        free_columns(DropsOn(sender), 0);
+        assert_eq!(
+            receiver.recv().expect("dropped here"),
+            std::thread::current().id()
+        );
+    }
+
     #[test]
     fn highest_skips_only_sections_that_cannot_match() {
         let (air, cave_air, stone) = (0, 7, 1);

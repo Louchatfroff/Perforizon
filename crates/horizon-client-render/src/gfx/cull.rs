@@ -32,6 +32,7 @@
 //! 1's depth as a texture and makes the same comparison in the shader: the
 //! fragment's depth against the stored one, greater or equal passing. The
 //! same fragments pass, so the same sections are seen.
+use glam::Vec3;
 use std::num::NonZeroU64;
 use std::sync::{
     Arc,
@@ -45,7 +46,7 @@ const RETEST: u32 = 8;
 /// the frame's solid indices: below it the test and the second pass cost
 /// more than they save. Else one frame in `PROBE` tests every section.
 const MIN_SHARE: f32 = 0.1;
-const PROBE: u32 = 64;
+const PROBE: u32 = 16;
 /// On Metal, sections in view from which a frame culls. Apple's GPUs store
 /// and reload the whole frame at each of the passes the test adds, a fixed
 /// cost that the sections it hides repay only at high render distances: on
@@ -152,6 +153,26 @@ pub struct Cull {
     pub always: bool,
     /// Frames with fewer sections in view than this do not cull.
     pub min_sections: usize,
+    tight: bool,
+}
+
+fn pack_box(bounds: Option<[Vec3; 2]>, tight: bool) -> u32 {
+    const OFFSET: f32 = 8.0;
+    let word =
+        |v: [i32; 3]| (v[0] + 2) as u32 | ((v[1] + 2) as u32) << 5 | ((v[2] + 2) as u32) << 10;
+    let full = word([-1; 3]) | word([17; 3]) << 15;
+    let Some([lo, hi]) = bounds.filter(|_| tight) else {
+        return full;
+    };
+    let lo = (lo + Vec3::splat(OFFSET)).to_array().map(|v| v as i32 - 8);
+    let hi = (hi + Vec3::splat(OFFSET))
+        .to_array()
+        .map(|v| v as i32 + i32::from(v > (v as i32) as f32) - 8);
+    if lo.iter().chain(&hi).all(|v| (-2..=29).contains(v)) {
+        word(lo) | word(hi) << 15
+    } else {
+        full
+    }
 }
 
 fn buffer(
@@ -308,7 +329,7 @@ impl Cull {
                 targets,
             }),
             multiview_mask: None,
-            cache: None,
+            cache: crate::gfx::pipeline_cache::get(),
         });
         Self {
             pipeline,
@@ -351,6 +372,7 @@ impl Cull {
             hidden: ([0; 2], 1.0),
             always: false,
             min_sections: 0,
+            tight: !std::env::var("HORIZON_CULL_TIGHT").is_ok_and(|v| v == "0"),
         }
     }
 
@@ -404,19 +426,89 @@ impl Cull {
 
     /// A section phase 1 draws, `index` in the visible list, with `indices`
     /// solid indices: tested in turn.
-    pub fn drawn(&mut self, index: usize, slot: u32, indices: u32) {
+    pub fn drawn(&mut self, index: usize, slot: u32, indices: u32, bounds: Option<[Vec3; 2]>) {
         self.total += u64::from(indices);
         if indices > 0 && (self.probe || slot.wrapping_add(self.stamp).is_multiple_of(RETEST)) {
-            self.push([index as u32, 0, 0, 0], slot, indices);
+            self.push([index as u32, 0, 0, self.pack(bounds)], slot, indices);
         }
     }
 
     /// A section left to phase 2: its `draws` from phase 2's `first`.
-    pub fn deferred(&mut self, index: usize, slot: u32, first: usize, draws: usize, indices: u32) {
+    pub fn deferred(
+        &mut self,
+        index: usize,
+        slot: u32,
+        first: usize,
+        draws: usize,
+        indices: u32,
+        bounds: Option<[Vec3; 2]>,
+    ) {
         self.total += u64::from(indices);
         if draws > 0 {
-            self.push([index as u32, first as u32, draws as u32, 0], slot, indices);
+            let bounds = self.pack(bounds);
+            self.push(
+                [index as u32, first as u32, draws as u32, bounds],
+                slot,
+                indices,
+            );
         }
+    }
+
+    pub(super) fn early_test(&self) -> bool {
+        self.depth_test == DepthTest::Early
+    }
+
+    pub(super) fn pack(&self, bounds: Option<[Vec3; 2]>) -> u32 {
+        pack_box(bounds, self.tight)
+    }
+
+    pub(super) fn rescue_group(
+        &self,
+        device: &wgpu::Device,
+        tests: &wgpu::Buffer,
+        results: &wgpu::Buffer,
+        origins: &wgpu::Buffer,
+        globals: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        fn whole(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+            wgpu::BindGroupEntry {
+                binding,
+                resource: buffer.as_entire_binding(),
+            }
+        }
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Section culling, rescued"),
+            layout: &self.layout,
+            entries: &[
+                whole(0, tests),
+                whole(1, results),
+                whole(2, &self.phase2),
+                whole(3, origins),
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: globals,
+                        offset: 0,
+                        size: NonZeroU64::new(64),
+                    }),
+                },
+                whole(5, &self.params),
+            ],
+        })
+    }
+
+    pub(super) fn test_indirect(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        group: &wgpu::BindGroup,
+        args: &wgpu::Buffer,
+    ) {
+        if self.depth_test != DepthTest::Early {
+            return;
+        }
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, group, &[]);
+        pass.draw_indirect(args, 0);
     }
 
     fn push(&mut self, test: [u32; 4], slot: u32, indices: u32) {
@@ -666,5 +758,46 @@ mod tests {
                 .validate(&module)
                 .unwrap_or_else(|e| panic!("{depth_test:?}: {e:?}"));
         }
+    }
+}
+
+#[cfg(test)]
+mod pack_tests {
+    use super::*;
+
+    fn reference(lo: Vec3, hi: Vec3) -> u32 {
+        let inside = |v: Vec3| v.cmpge(Vec3::splat(-2.0)).all() && v.cmple(Vec3::splat(29.0)).all();
+        let word = |v: Vec3| {
+            (v.x as i32 + 2) as u32
+                | ((v.y as i32 + 2) as u32) << 5
+                | ((v.z as i32 + 2) as u32) << 10
+        };
+        let (lo, hi) = (lo.floor(), hi.ceil());
+        if inside(lo) && inside(hi) {
+            word(lo) | word(hi) << 15
+        } else {
+            word(Vec3::splat(-1.0)) | word(Vec3::splat(17.0)) << 15
+        }
+    }
+
+    #[test]
+    fn packed_box_matches_floor_and_ceil() {
+        let mut n = 0u32;
+        let mut next = move || {
+            n = n.wrapping_mul(1664525).wrapping_add(1013904223);
+            (n >> 8) as f32 / (1 << 24) as f32
+        };
+        for _ in 0..20000 {
+            let lo = Vec3::new(next(), next(), next()) * 40.0 - Vec3::splat(8.0);
+            let hi = lo + Vec3::new(next(), next(), next()) * 20.0;
+            assert_eq!(
+                pack_box(Some([lo, hi]), true),
+                reference(lo, hi),
+                "{lo} {hi}"
+            );
+        }
+        let int = Vec3::new(0.0, 3.0, 16.0);
+        assert_eq!(pack_box(Some([int, int]), true), reference(int, int));
+        assert_eq!(pack_box(Some([int, int]), false), pack_box(None, true));
     }
 }

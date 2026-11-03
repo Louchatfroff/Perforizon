@@ -499,7 +499,7 @@ mod tests {
 
     #[test]
     fn large_tile_bounds_include_water_and_do_not_cull_by_origin() {
-        let vertex = |pos| TerrainVertex::tiled(pos, [0.0; 2], 0, 0, 0);
+        let vertex = |pos| TerrainVertex::tiled(pos, [0.0; 2], 0, 0, 0, 0);
         let mesh = SectionMesh {
             solid: vec![vertex([0.0, -64.0, 0.0]), vertex([1024.0, 100.0, 1024.0])],
             translucent: vec![vertex([512.0, 120.0, 512.0])],

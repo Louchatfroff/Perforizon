@@ -1,0 +1,5 @@
+Portions of cmaa2.rs and cmaa2.wgsl are a port of Intel CMAA2 (CMAA2.hlsl, version 2.3).
+Copyright (c) 2018, Intel Corporation. Author: Filip Strugar.
+Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0).
+Source: https://github.com/GameTechDev/CMAA2
+Changes: translated to WGSL and wgpu.

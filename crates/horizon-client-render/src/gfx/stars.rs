@@ -121,7 +121,7 @@ impl Stars {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Always),
+                depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
@@ -145,7 +145,7 @@ impl Stars {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: crate::gfx::pipeline_cache::get(),
         });
         Self {
             pipeline,

@@ -193,6 +193,40 @@ impl GraphicsApi {
     }
 }
 
+/// Whether optimizations may change the picture slightly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum OptimizationMode {
+    #[default]
+    Performance,
+    Parity,
+}
+impl OptimizationMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            OptimizationMode::Performance => "performance",
+            OptimizationMode::Parity => "parity",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            OptimizationMode::Performance => "Performance",
+            OptimizationMode::Parity => "Exact parity",
+        }
+    }
+    fn parse(s: &str) -> Self {
+        match s {
+            "parity" => OptimizationMode::Parity,
+            _ => OptimizationMode::Performance,
+        }
+    }
+    pub fn toggled(self) -> Self {
+        match self {
+            OptimizationMode::Performance => OptimizationMode::Parity,
+            OptimizationMode::Parity => OptimizationMode::Performance,
+        }
+    }
+}
+
 /// What the frame limiter does in the last half millisecond before a frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Pacing {
@@ -243,6 +277,29 @@ impl FarDetail {
         } else {
             FarDetail::Full
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SpatialAa {
+    #[default]
+    None,
+    Smaa,
+    Cmaa2,
+}
+impl SpatialAa {
+    pub fn name(self) -> &'static str {
+        match self {
+            SpatialAa::None => "none",
+            SpatialAa::Smaa => "smaa",
+            SpatialAa::Cmaa2 => "cmaa2",
+        }
+    }
+    fn parse(s: &str) -> Self {
+        [SpatialAa::Smaa, SpatialAa::Cmaa2]
+            .into_iter()
+            .find(|a| a.name() == s)
+            .unwrap_or_default()
     }
 }
 
@@ -335,6 +392,8 @@ pub fn lod_capped(info: &wgpu::AdapterInfo) -> bool {
     info.device_type == wgpu::DeviceType::IntegratedGpu && !info.name.starts_with("Apple")
 }
 /// A LOD distance as far terrain uses it on this adapter.
+pub const MAX_LEAF_DISTANCE: u32 = 32;
+pub const MAX_FAR_TERRAIN_DISTANCE: u32 = 64;
 pub fn lod_distance_capped(distance: u32, info: &wgpu::AdapterInfo) -> u32 {
     let distance = distance.min(crate::lod::MAX_CHUNKS);
     if lod_capped(info) {
@@ -376,6 +435,10 @@ pub struct Graphics {
     pub dither_cutout_mips: bool,
     pub present_mode: PresentMode,
     pub pacing: Pacing,
+    pub frame_latency: u32,
+    /// Times the input event behind each frame to its present and to the GPU finishing it,
+    /// and shows the rolling average and worst. Off by default; it never changes a frame.
+    pub latency_hud: bool,
     /// Chunk worker threads; 0 uses every core but one. Applies at the next start.
     pub workers: u32,
     pub overlay: Overlay,
@@ -385,6 +448,10 @@ pub struct Graphics {
     pub fxaa: bool,
     /// TAA over the world (FXAA is off while it is on).
     pub taa: bool,
+    /// SMAA or CMAA2 over the world (FXAA and TAA are off while one is on).
+    pub spatial_aa: SpatialAa,
+    /// FSR's sharpening on TAA's picture (native AA), and FSR's upscaler under the window's size.
+    pub fsr: bool,
     /// TAA upscaling; anything but `Native` comes with `taa` on.
     pub upscaling: Upscaling,
     /// F2 screenshots at this many times the game's resolution: 1, 2, 4 or 8.
@@ -413,6 +480,39 @@ pub struct Graphics {
     /// pack uniforms still match. Off by default: vanilla loaders redraw every frame
     /// (or every `shadowInterval`), and a hit with a stale key shows old shadows.
     pub shadow_cache: bool,
+    pub mesh_shaders: bool,
+    /// Performance allows optimizations that change pixels slightly (greedy meshing);
+    /// Parity keeps every one of them off.
+    pub optimization_mode: OptimizationMode,
+    /// Merges coplanar block faces into larger quads (Performance mode only; autotune picks).
+    pub greedy_meshing: bool,
+    /// Merges the faces with a sort-free pass over per-plane bit rows instead of sorting every
+    /// quad; same quads, less mesh time. Needs `greedy_meshing`; off until the auto-tune picks it.
+    pub binary_greedy: bool,
+    /// One large vertex page for the terrain instead of several 256 MiB ones: fewer draw runs,
+    /// no repeated growth. Same pixels; off until the auto-tune picks it.
+    pub vertex_pool: bool,
+    pub hiz_occlusion: bool,
+    /// Particle quads expanded on the GPU from one small record each; off until the auto-tune
+    /// picks it (Performance mode only).
+    pub gpu_particles: bool,
+    pub shadow_indirect: bool,
+    pub far_lod_coarse: bool,
+    /// Block sprites as BC7 blocks (4 times smaller, lossy) where the GPU has them; applies at a
+    /// resource reload. Off until the auto-tune picks it; never in Exact parity or with a shader pack.
+    pub texture_compression: bool,
+    /// Leaves farther than this many chunks mesh as solid blocks (Performance mode only); 0 keeps
+    /// every leaf fancy.
+    pub leaf_distance: u32,
+    /// Sections past this many chunks give way to far terrain tiles (Performance mode, needs a
+    /// local world); 0 keeps full sections out to the render distance.
+    pub far_terrain_distance: u32,
+    /// Hold small network packets and send them as one train per frame and tick. Off by default;
+    /// the auto-tune cannot measure a network, so it never toggles it. The wire bytes are unchanged.
+    pub net_low_latency: bool,
+    /// Keeps the driver's compiled pipelines in a file in the game folder (Vulkan). Applies at the
+    /// next start. The auto-tune cannot measure a start, so it never toggles it.
+    pub pipeline_cache: bool,
     /// The graphics API (Windows only; see `GraphicsApi`).
     pub api: GraphicsApi,
     /// The shader pack picked in `shaderpacks/` (`shader_pack_list`); empty: none. Its key is
@@ -438,11 +538,15 @@ impl Default for Graphics {
             dither_cutout_mips: false,
             present_mode: PresentMode::Auto,
             pacing: Pacing::Efficient,
+            frame_latency: 0,
+            latency_hud: false,
             workers: 0,
             overlay: Overlay::Off,
             resolution_scale: 100,
             fxaa: false,
             taa: false,
+            spatial_aa: SpatialAa::None,
+            fsr: false,
             upscaling: Upscaling::Native,
             screenshot_quality: 1,
             hdr: false,
@@ -453,6 +557,20 @@ impl Default for Graphics {
             hdr_key: "key.keyboard.unknown".into(),
             battery: false,
             shadow_cache: false,
+            mesh_shaders: false,
+            optimization_mode: OptimizationMode::Performance,
+            greedy_meshing: true,
+            binary_greedy: false,
+            vertex_pool: false,
+            hiz_occlusion: false,
+            gpu_particles: false,
+            shadow_indirect: false,
+            far_lod_coarse: false,
+            texture_compression: false,
+            leaf_distance: 5,
+            far_terrain_distance: 0,
+            net_low_latency: false,
+            pipeline_cache: false,
             api: GraphicsApi::Auto,
             shader_pack: String::new(),
         }
@@ -477,6 +595,11 @@ impl Graphics {
     }
     pub fn parse(text: &str) -> Self {
         let mut g = Self::default();
+        g.merge(text);
+        g
+    }
+    pub fn merge(&mut self, text: &str) {
+        let g = self;
         for line in text.lines() {
             let Some((key, value)) = line.split_once(':') else {
                 continue;
@@ -514,10 +637,14 @@ impl Graphics {
                         Pacing::Efficient
                     }
                 }
+                "frameLatency" => g.frame_latency = number(g.frame_latency).min(3),
+                "latencyHud" => g.latency_hud = flag(g.latency_hud),
                 "workers" => g.workers = number(g.workers).min(64),
                 "resolutionScale" => g.resolution_scale = number(g.resolution_scale).clamp(50, 200),
                 "fxaa" => g.fxaa = flag(g.fxaa),
                 "taa" => g.taa = flag(g.taa),
+                "spatialAa" => g.spatial_aa = SpatialAa::parse(value),
+                "fsr" => g.fsr = flag(g.fsr),
                 "upscaling" => g.upscaling = Upscaling::parse(value),
                 "screenshotQuality" => {
                     g.screenshot_quality = Some(number(0))
@@ -544,6 +671,23 @@ impl Graphics {
                 "hdrKey" if value.starts_with("key.") => g.hdr_key = value.to_owned(),
                 "batteryMode" => g.battery = flag(g.battery),
                 "shadowCache" => g.shadow_cache = flag(g.shadow_cache),
+                "meshShaders" => g.mesh_shaders = flag(g.mesh_shaders),
+                "netLowLatency" => g.net_low_latency = flag(g.net_low_latency),
+                "pipelineCache" => g.pipeline_cache = flag(g.pipeline_cache),
+                "optimizationMode" => g.optimization_mode = OptimizationMode::parse(value),
+                "greedyMeshing" => g.greedy_meshing = flag(g.greedy_meshing),
+                "binaryGreedy" => g.binary_greedy = flag(g.binary_greedy),
+                "vertexPool" => g.vertex_pool = flag(g.vertex_pool),
+                "hizOcclusion" => g.hiz_occlusion = flag(g.hiz_occlusion),
+                "gpuParticles" => g.gpu_particles = flag(g.gpu_particles),
+                "shadowIndirect" => g.shadow_indirect = flag(g.shadow_indirect),
+                "farLodCoarse" => g.far_lod_coarse = flag(g.far_lod_coarse),
+                "textureCompression" => g.texture_compression = flag(g.texture_compression),
+                "leafDistance" => g.leaf_distance = number(g.leaf_distance).min(MAX_LEAF_DISTANCE),
+                "farTerrainDistance" => {
+                    g.far_terrain_distance =
+                        number(g.far_terrain_distance).min(MAX_FAR_TERRAIN_DISTANCE)
+                }
                 "graphicsApi" => g.api = GraphicsApi::from_name(value).unwrap_or_default(),
                 "pickedShaderPack" => g.shader_pack = value.to_owned(),
                 "overlay" => {
@@ -556,11 +700,11 @@ impl Graphics {
                 _ => {}
             }
         }
-        g
     }
     pub fn serialize(&self) -> String {
         format!(
-            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nscreenshotQuality:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrKey:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\n",
+            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nframeLatency:{}
+latencyHud:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nspatialAa:{}\nfsr:{}\nupscaling:{}\nscreenshotQuality:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrKey:{}\nbatteryMode:{}\nshadowCache:{}\nmeshShaders:{}\noptimizationMode:{}\ngreedyMeshing:{}\nbinaryGreedy:{}\nvertexPool:{}\nhizOcclusion:{}\ngpuParticles:{}\nshadowIndirect:{}\nfarLodCoarse:{}\ntextureCompression:{}\nleafDistance:{}\nfarTerrainDistance:{}\nnetLowLatency:{}\npipelineCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\n",
             self.preset.name(),
             self.lod_distance,
             self.far_detail.name(),
@@ -579,6 +723,8 @@ impl Graphics {
                 Pacing::Efficient => "efficient",
                 Pacing::Precise => "precise",
             },
+            self.frame_latency,
+            bool_text(self.latency_hud),
             self.workers,
             match self.overlay {
                 Overlay::Off => "off",
@@ -588,6 +734,8 @@ impl Graphics {
             self.resolution_scale,
             bool_text(self.fxaa),
             bool_text(self.taa),
+            self.spatial_aa.name(),
+            bool_text(self.fsr),
             self.upscaling.name(),
             self.screenshot_quality,
             bool_text(self.hdr),
@@ -598,9 +746,52 @@ impl Graphics {
             self.hdr_key,
             bool_text(self.battery),
             bool_text(self.shadow_cache),
+            bool_text(self.mesh_shaders),
+            self.optimization_mode.name(),
+            bool_text(self.greedy_meshing),
+            bool_text(self.binary_greedy),
+            bool_text(self.vertex_pool),
+            bool_text(self.hiz_occlusion),
+            bool_text(self.gpu_particles),
+            bool_text(self.shadow_indirect),
+            bool_text(self.far_lod_coarse),
+            bool_text(self.texture_compression),
+            self.leaf_distance,
+            self.far_terrain_distance,
+            bool_text(self.net_low_latency),
+            bool_text(self.pipeline_cache),
             self.api.name(),
             self.shader_pack,
         )
+    }
+    pub fn exact_parity(&self) -> bool {
+        self.optimization_mode == OptimizationMode::Parity
+    }
+    pub fn leaf_chunks(&self) -> u32 {
+        if self.exact_parity() {
+            0
+        } else {
+            self.leaf_distance
+        }
+    }
+    pub fn far_terrain_chunks(&self) -> u32 {
+        if self.exact_parity() {
+            0
+        } else {
+            self.far_terrain_distance
+        }
+    }
+    pub fn far_lod_coarse(&self) -> bool {
+        self.far_lod_coarse && !self.exact_parity()
+    }
+    pub fn greedy(&self) -> bool {
+        self.greedy_meshing && !self.exact_parity()
+    }
+    pub fn texture_compression(&self) -> bool {
+        self.texture_compression && !self.exact_parity() && self.shader_pack.is_empty()
+    }
+    pub fn binary_greedy(&self) -> bool {
+        self.binary_greedy && self.greedy()
     }
     /// Binds Horizon's graphics key `name` (`HDR_KEY`); false for another name.
     pub fn set_key(&mut self, name: &str, value: String) -> bool {
@@ -714,6 +905,56 @@ mod tests {
     }
 
     #[test]
+    fn leaf_distance_is_bounded_and_parity_keeps_fancy_leaves() {
+        assert_eq!(Graphics::default().leaf_chunks(), 5);
+        assert_eq!(
+            Graphics::parse(
+                "leafDistance:0
+"
+            )
+            .leaf_distance,
+            0
+        );
+        assert_eq!(
+            Graphics::parse(
+                "leafDistance:9999
+"
+            )
+            .leaf_distance,
+            MAX_LEAF_DISTANCE
+        );
+        let mut g = Graphics::parse(
+            "leafDistance:7
+",
+        );
+        assert_eq!(g.leaf_chunks(), 7);
+        g.optimization_mode = OptimizationMode::Parity;
+        assert_eq!(g.leaf_chunks(), 0);
+    }
+
+    #[test]
+    fn far_terrain_distance_is_bounded_and_parity_keeps_full_sections() {
+        assert_eq!(Graphics::default().far_terrain_chunks(), 0);
+        assert_eq!(
+            Graphics::parse(
+                "farTerrainDistance:9999
+"
+            )
+            .far_terrain_distance,
+            MAX_FAR_TERRAIN_DISTANCE
+        );
+        let mut g = Graphics::parse(
+            "farTerrainDistance:0
+",
+        );
+        assert_eq!(g.far_terrain_chunks(), 0);
+        g.far_terrain_distance = 18;
+        assert_eq!(g.far_terrain_chunks(), 18);
+        g.optimization_mode = OptimizationMode::Parity;
+        assert_eq!(g.far_terrain_chunks(), 0);
+    }
+
+    #[test]
     fn round_trips() {
         let g = Graphics {
             preset: Preset::Balanced,
@@ -731,11 +972,15 @@ mod tests {
             dither_cutout_mips: true,
             present_mode: PresentMode::Mailbox,
             pacing: Pacing::Precise,
+            frame_latency: 1,
+            latency_hud: false,
             workers: 6,
             overlay: Overlay::Graph,
             resolution_scale: 75,
             fxaa: true,
             taa: true,
+            spatial_aa: SpatialAa::None,
+            fsr: false,
             upscaling: Upscaling::Balanced,
             screenshot_quality: 4,
             hdr: true,
@@ -746,11 +991,28 @@ mod tests {
             hdr_key: "key.keyboard.h".into(),
             battery: true,
             shadow_cache: true,
+            mesh_shaders: true,
+            optimization_mode: OptimizationMode::Parity,
+            greedy_meshing: false,
+            binary_greedy: true,
+            vertex_pool: true,
+            hiz_occlusion: true,
+            gpu_particles: true,
+            shadow_indirect: true,
+            far_lod_coarse: true,
+            texture_compression: true,
+            leaf_distance: 9,
+            far_terrain_distance: 18,
+            net_low_latency: true,
+            pipeline_cache: true,
             api: GraphicsApi::Dx12,
             shader_pack: "Golden Hour".into(),
         };
         assert_eq!(Graphics::parse(&g.serialize()), g);
         assert_eq!(Graphics::parse(""), Graphics::default());
+        assert!(!Graphics::default().net_low_latency);
+        assert!(Graphics::parse("netLowLatency:true\n").net_low_latency);
+        assert!(!Graphics::parse("netLowLatency:maybe\n").net_low_latency);
         // 0 is Auto; anything else is a peak the slider reaches.
         assert_eq!(Graphics::parse("hdrPeak:0\n").hdr_peak, 0);
         assert_eq!(Graphics::parse("hdrPeak:50\n").hdr_peak, 200);
@@ -779,6 +1041,87 @@ mod tests {
         assert_eq!(
             Graphics::parse("workers:abc\nsky:maybe\ncullLeaves:true\nentityCulling:maybe\n"),
             Graphics::default()
+        );
+    }
+
+    #[test]
+    fn optimization_mode_parses_and_survives_presets() {
+        assert!(!Graphics::default().exact_parity());
+        assert!(Graphics::default().greedy());
+        let mut off = Graphics::parse(
+            "greedyMeshing:false
+",
+        );
+        assert!(!off.greedy());
+        off.greedy_meshing = true;
+        off.optimization_mode = OptimizationMode::Parity;
+        assert!(!off.greedy());
+        assert!(!Graphics::default().binary_greedy());
+        let mut binary = Graphics::parse(
+            "binaryGreedy:true
+",
+        );
+        assert!(binary.binary_greedy());
+        binary.greedy_meshing = false;
+        assert!(!binary.binary_greedy());
+        binary.greedy_meshing = true;
+        binary.optimization_mode = OptimizationMode::Parity;
+        assert!(!binary.binary_greedy());
+        assert!(
+            !Graphics::parse(
+                "optimizationMode:junk
+"
+            )
+            .exact_parity()
+        );
+        let mut g = Graphics::parse(
+            "optimizationMode:parity
+",
+        );
+        assert!(g.exact_parity());
+        assert!(Graphics::parse(&g.serialize()).exact_parity());
+        g.merge(
+            "optimizationMode:performance
+",
+        );
+        assert!(!g.exact_parity());
+        let mut s = crate::settings::Settings::default();
+        s.horizon.optimization_mode = OptimizationMode::Parity;
+        apply_preset(Preset::Ultra, &mut s);
+        assert!(s.horizon.exact_parity());
+    }
+
+    #[test]
+    fn frame_latency_round_trips_and_clamps() {
+        let g = Graphics {
+            frame_latency: 2,
+            ..Graphics::default()
+        };
+        assert_eq!(Graphics::parse(&g.serialize()).frame_latency, 2);
+        assert_eq!(
+            Graphics::parse(
+                "frameLatency:9
+"
+            )
+            .frame_latency,
+            3
+        );
+    }
+
+    #[test]
+    fn latency_hud_is_off_by_default_and_round_trips() {
+        assert!(!Graphics::default().latency_hud);
+        let g = Graphics {
+            latency_hud: true,
+            ..Graphics::default()
+        };
+        assert!(Graphics::parse(&g.serialize()).latency_hud);
+        assert!(
+            !Graphics::parse(
+                "latencyHud:maybe
+"
+            )
+            .latency_hud
         );
     }
 
@@ -819,6 +1162,206 @@ mod tests {
                 .any(|row| matches!(row, crate::graphics_ui::Row::Setting(s)
                     if s.text.contains(&format!("{INTEGRATED_LOD_DISTANCE} chunks")))),
             "the LOD Distance description names the cap"
+        );
+    }
+
+    #[test]
+    fn pipeline_cache_is_off_until_the_file_or_the_ctl_turns_it_on() {
+        assert!(!Graphics::default().pipeline_cache);
+        assert!(!Graphics::parse("pipelineCache:maybe").pipeline_cache);
+        let on = Graphics::parse("pipelineCache:true");
+        assert!(on.pipeline_cache);
+        assert!(Graphics::parse(&on.serialize()).pipeline_cache);
+        assert!(!Graphics::parse(&Graphics::default().serialize()).pipeline_cache);
+        let mut merged = on.clone();
+        merged.merge(
+            "pipelineCache:false
+",
+        );
+        assert!(!merged.pipeline_cache);
+    }
+    #[test]
+    fn vertex_pool_is_off_by_default_and_round_trips() {
+        assert!(!Graphics::default().vertex_pool);
+        assert!(!Graphics::parse("").vertex_pool);
+        assert!(Graphics::parse("vertexPool:true\n").vertex_pool);
+        assert!(!Graphics::parse("vertexPool:maybe\n").vertex_pool);
+        let on = Graphics {
+            vertex_pool: true,
+            ..Graphics::default()
+        };
+        assert!(on.serialize().lines().any(|l| l == "vertexPool:true"));
+        assert!(Graphics::parse(&on.serialize()).vertex_pool);
+        let mut merged = on.clone();
+        merged.merge("vertexPool:false\n");
+        assert!(!merged.vertex_pool);
+    }
+    #[test]
+    fn texture_compression_is_off_by_default_round_trips_and_yields_to_parity_and_packs() {
+        assert!(!Graphics::default().texture_compression);
+        assert!(!Graphics::parse("").texture_compression());
+        assert!(Graphics::parse("textureCompression:true\n").texture_compression());
+        assert!(!Graphics::parse("textureCompression:maybe\n").texture_compression);
+        let on = Graphics::parse("textureCompression:true\n");
+        assert!(
+            on.serialize()
+                .lines()
+                .any(|l| l == "textureCompression:true")
+        );
+        assert!(Graphics::parse(&on.serialize()).texture_compression());
+        let mut g = on.clone();
+        g.merge("textureCompression:false\n");
+        assert!(!g.texture_compression);
+        let parity = Graphics::parse("textureCompression:true\noptimizationMode:parity\n");
+        assert!(parity.texture_compression && !parity.texture_compression());
+        let mut packed = on;
+        packed.shader_pack = "Golden Hour".into();
+        assert!(!packed.texture_compression());
+    }
+    #[test]
+    fn far_lod_coarse_is_off_by_default_round_trips_and_parity_ignores_it() {
+        assert!(!Graphics::default().far_lod_coarse);
+        assert!(!Graphics::parse("").far_lod_coarse);
+        assert!(
+            Graphics::parse(
+                "farLodCoarse:true
+"
+            )
+            .far_lod_coarse
+        );
+        assert!(
+            !Graphics::parse(
+                "farLodCoarse:maybe
+"
+            )
+            .far_lod_coarse
+        );
+        let mut on = Graphics {
+            far_lod_coarse: true,
+            ..Graphics::default()
+        };
+        assert!(on.serialize().lines().any(|l| l == "farLodCoarse:true"));
+        assert!(Graphics::parse(&on.serialize()).far_lod_coarse);
+        assert!(on.far_lod_coarse());
+        on.merge(
+            "farLodCoarse:false
+",
+        );
+        assert!(!on.far_lod_coarse);
+        on.far_lod_coarse = true;
+        on.optimization_mode = OptimizationMode::Parity;
+        assert!(!on.far_lod_coarse());
+    }
+
+    #[test]
+    fn shadow_indirect_is_off_by_default_and_round_trips() {
+        assert!(!Graphics::default().shadow_indirect);
+        assert!(!Graphics::parse("").shadow_indirect);
+        assert!(
+            Graphics::parse(
+                "shadowIndirect:true
+"
+            )
+            .shadow_indirect
+        );
+        assert!(
+            !Graphics::parse(
+                "shadowIndirect:maybe
+"
+            )
+            .shadow_indirect
+        );
+        let on = Graphics {
+            shadow_indirect: true,
+            ..Graphics::default()
+        };
+        assert!(on.serialize().lines().any(|l| l == "shadowIndirect:true"));
+        assert!(Graphics::parse(&on.serialize()).shadow_indirect);
+        let mut merged = on.clone();
+        merged.merge(
+            "shadowIndirect:false
+",
+        );
+        assert!(!merged.shadow_indirect);
+    }
+
+    #[test]
+    fn gpu_particles_is_off_by_default_and_round_trips() {
+        assert!(!Graphics::default().gpu_particles);
+        assert!(!Graphics::parse("").gpu_particles);
+        assert!(
+            Graphics::parse(
+                "gpuParticles:true
+"
+            )
+            .gpu_particles
+        );
+        let on = Graphics {
+            gpu_particles: true,
+            ..Graphics::default()
+        };
+        assert!(on.serialize().lines().any(|l| l == "gpuParticles:true"));
+        assert!(Graphics::parse(&on.serialize()).gpu_particles);
+        let mut merged = on.clone();
+        merged.merge(
+            "gpuParticles:false
+",
+        );
+        assert!(!merged.gpu_particles);
+    }
+
+    #[test]
+    fn hiz_occlusion_is_off_by_default_and_round_trips() {
+        assert!(!Graphics::default().hiz_occlusion);
+        assert!(!Graphics::parse("").hiz_occlusion);
+        assert!(Graphics::parse("hizOcclusion:true\n").hiz_occlusion);
+        assert!(!Graphics::parse("hizOcclusion:maybe\n").hiz_occlusion);
+        let on = Graphics {
+            hiz_occlusion: true,
+            ..Graphics::default()
+        };
+        assert!(on.serialize().lines().any(|l| l == "hizOcclusion:true"));
+        assert!(Graphics::parse(&on.serialize()).hiz_occlusion);
+        let mut merged = on.clone();
+        merged.merge("hizOcclusion:false\n");
+        assert!(!merged.hiz_occlusion);
+    }
+    #[test]
+    fn mesh_shaders_are_off_unless_the_file_says_otherwise() {
+        assert!(!Graphics::default().mesh_shaders);
+        assert!(!Graphics::parse("").mesh_shaders);
+        assert!(
+            Graphics::parse(
+                "meshShaders:true
+"
+            )
+            .mesh_shaders
+        );
+        assert!(
+            !Graphics::parse(
+                "meshShaders:false
+"
+            )
+            .mesh_shaders
+        );
+        assert!(
+            !Graphics::parse(
+                "meshShaders:maybe
+"
+            )
+            .mesh_shaders
+        );
+        let on = Graphics {
+            mesh_shaders: true,
+            ..Graphics::default()
+        };
+        assert!(on.serialize().lines().any(|l| l == "meshShaders:true"));
+        assert_eq!(Graphics::parse(&on.serialize()), on);
+        assert!(
+            Graphics::default()
+                .serialize()
+                .lines()
+                .any(|l| l == "meshShaders:false")
         );
     }
 

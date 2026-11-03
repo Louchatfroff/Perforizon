@@ -143,12 +143,41 @@ fn entity_vertex(position: vec3<f32>, uv: vec2<f32>,
     if overlay == 4u { out.spherical = length(position); }
     return out;
 }
-@vertex fn vs_entity(@location(0) position: vec3<f32>, @location(1) uv: vec2<f32>,
-    @location(2) overlay: u32, @location(3) color: vec4<f32>, @location(4) light: vec4<u32>,
-    @location(5) normal: vec4<f32>, @location(6) glint_uv: vec2<f32>) -> Out {
+fn glint_vertex(position: vec3<f32>, uv: vec2<f32>, overlay: u32, color: vec4<f32>,
+    light: vec4<u32>, normal: vec4<f32>, glint_uv: vec2<f32>) -> Out {
     var out = entity_vertex(position, uv, overlay & 0xffffu, color, light, normal);
     out.glint_uv = glint_uv;
     out.tier = (overlay >> 16u) & 0xffu;
+    return out;
+}
+@vertex fn vs_entity(@location(0) position: vec3<f32>, @location(1) uv: vec2<f32>,
+    @location(2) overlay: u32, @location(3) color: vec4<f32>, @location(4) light: vec4<u32>,
+    @location(5) normal: vec4<f32>, @location(6) glint_uv: vec2<f32>) -> Out {
+    return glint_vertex(position, uv, overlay, color, light, normal, glint_uv);
+}
+// GPU particles: one instance per camera-facing quad; the camera's right and up axes ride in
+// the cloud uniform's slots (offset: right, colors[0]: up).
+@vertex fn vs_particle(@builtin(vertex_index) corner: u32,
+    @location(0) center_size: vec4<f32>, @location(1) uv_rect: vec4<f32>, @location(2) roll: f32,
+    @location(3) color: u32, @location(4) light: u32, @location(5) overlay: u32) -> Out {
+    let far_u = corner < 2u;
+    let far_v = corner == 0u || corner == 3u;
+    let n = vec2(select(-1.0, 1.0, far_u), select(1.0, -1.0, far_v));
+    let c = cos(roll);
+    let s = sin(roll);
+    let local = vec2(n.x * c - n.y * s, n.x * s + n.y * c) * center_size.w;
+    let position = center_size.xyz + cloud.offset.xyz * local.x + cloud.colors[0].xyz * local.y;
+    let uv = vec2(select(uv_rect.x, uv_rect.z, far_u), select(uv_rect.y, uv_rect.w, far_v));
+    let bytes = vec4<u32>(light & 255u, (light >> 8u) & 255u, (light >> 16u) & 255u, light >> 24u);
+    return glint_vertex(position, uv, overlay, unpack4x8unorm(color), bytes, vec4(0.0), vec2(0.0));
+}
+// The sky's quads sit on the far plane, where only the pixels no terrain covers pass the
+// depth test, so they may be drawn after the terrain.
+@vertex fn vs_sky_celestial(@location(0) position: vec3<f32>, @location(1) uv: vec2<f32>,
+    @location(2) overlay: u32, @location(3) color: vec4<f32>, @location(4) light: vec4<u32>,
+    @location(5) normal: vec4<f32>, @location(6) glint_uv: vec2<f32>) -> Out {
+    var out = glint_vertex(position, uv, overlay, color, light, normal, glint_uv);
+    out.clip.z = 0.0;
     return out;
 }
 // Retained bolt-local geometry, translated using the same f64 camera

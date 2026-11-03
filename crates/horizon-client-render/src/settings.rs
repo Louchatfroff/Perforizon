@@ -197,6 +197,8 @@ pub struct Settings {
     pub controller: crate::gamepad::PadSettings,
     /// Horizon's optional extras (`horizon-extras.txt`), all off by default.
     pub extras: crate::extras::Extras,
+    /// PvP latency and display options (`horizon-pvp.txt`).
+    pub pvp: crate::pvp::Pvp,
     /// The Horizon mods turned on (`horizon-mods.txt`), all off by default.
     pub mods: crate::mod_list::ModList,
     /// The packs in `shaderpacks/`, listed when the Shader Packs page opens; the pick is
@@ -285,6 +287,7 @@ impl Default for Settings {
             video_modes: Vec::new(),
             controller: Default::default(),
             extras: Default::default(),
+            pvp: Default::default(),
             mods: Default::default(),
             shader_packs: Vec::new(),
             shader_options: None,
@@ -333,6 +336,8 @@ impl Settings {
             .map(crate::graphics::Graphics::load)
             .unwrap_or_default();
         crate::mipmap::set_dither_cutouts(horizon.dither_cutout_mips);
+        crate::bc7::set_requested(horizon.texture_compression());
+        crate::gfx::pipeline_cache::request(path.parent().filter(|_| horizon.pipeline_cache));
         let controller = path
             .parent()
             .map(crate::gamepad::PadSettings::load)
@@ -341,6 +346,7 @@ impl Settings {
             .parent()
             .map(crate::extras::Extras::load)
             .unwrap_or_default();
+        let pvp = path.parent().map(crate::pvp::Pvp::load).unwrap_or_default();
         let mods = path
             .parent()
             .map(crate::mod_list::ModList::load)
@@ -350,6 +356,7 @@ impl Settings {
                 horizon,
                 controller,
                 extras,
+                pvp,
                 mods,
                 ..Self::parse(&String::from_utf8_lossy(&bytes))
             },
@@ -357,6 +364,7 @@ impl Settings {
                 horizon,
                 controller,
                 extras,
+                pvp,
                 mods,
                 ..Self::default()
             },
@@ -469,6 +477,7 @@ impl Settings {
             video_modes: Vec::new(),
             controller: Default::default(),
             extras: Default::default(),
+            pvp: Default::default(),
             mods: Default::default(),
             shader_packs: Vec::new(),
             shader_options: None,
@@ -634,6 +643,7 @@ impl Settings {
             horizon: self.horizon.clone(),
             controller: self.controller.clone(),
             extras: self.extras.clone(),
+            pvp: self.pvp.clone(),
             mods: self.mods.clone(),
             video_modes: self.video_modes.clone(),
             ..Self::from_file(file)
@@ -650,6 +660,7 @@ impl Settings {
             self.horizon.save(dir);
             self.controller.save(dir);
             self.extras.save(dir);
+            self.pvp.save(dir);
             self.mods.save(dir);
         }
     }

@@ -8,7 +8,11 @@
 //! vectors are the camera's, so what moves on its own leans on the neighbourhood
 //! clamp alone.
 
+use super::aa::{cmaa2::Cmaa2, fsr::Fsr, smaa::Smaa};
+use crate::graphics::SpatialAa;
 use glam::{DMat4, DVec3, Mat4, Vec2};
+
+const FSR_SHARPNESS: f32 = 1.75;
 
 /// The TAA history format: 8 bits would band as frames accumulate.
 const HISTORY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -29,6 +33,13 @@ struct History {
     history: [wgpu::TextureView; 2],
     resolve: [wgpu::BindGroup; 2],
     show: [wgpu::BindGroup; 2],
+}
+
+struct Filtered {
+    size: [u32; 2],
+    mode: SpatialAa,
+    view: wgpu::TextureView,
+    group: wgpu::BindGroup,
 }
 
 /// `world_post.wgsl`'s `Taa`.
@@ -60,6 +71,12 @@ pub struct Post {
     pub scale: f32,
     pub antialias: bool,
     pub taa: bool,
+    pub spatial: SpatialAa,
+    pub fsr: bool,
+    smaa: Option<Smaa>,
+    cmaa2: Option<Cmaa2>,
+    fsr_pass: Option<Fsr>,
+    filtered: Option<Filtered>,
     /// Output pixels per rendered pixel while TAA is on (1: native): the world renders
     /// this much smaller and TAA rebuilds it at the resolution scale's size.
     pub upscale: f32,
@@ -141,7 +158,7 @@ impl Post {
                     })],
                 }),
                 multiview_mask: None,
-                cache: None,
+                cache: crate::gfx::pipeline_cache::get(),
             })
         };
         // The OpenGL backend's GLSL translator does not support textureLoad
@@ -203,7 +220,7 @@ impl Post {
                     })],
                 }),
                 multiview_mask: None,
-                cache: None,
+                cache: crate::gfx::pipeline_cache::get(),
             });
             let internal = pollster::block_on(internal.pop());
             match internal.or(pollster::block_on(validation.pop())) {
@@ -241,6 +258,12 @@ impl Post {
             scale: 1.0,
             antialias: false,
             taa: false,
+            spatial: SpatialAa::None,
+            fsr: false,
+            smaa: None,
+            cmaa2: None,
+            fsr_pass: None,
+            filtered: None,
             upscale: 1.0,
             taa_on: false,
             target: None,
@@ -254,6 +277,17 @@ impl Post {
     /// Whether TAA is supported on this GPU/backend.
     pub fn supports_taa(&self) -> bool {
         self.taa_resources.is_some()
+    }
+
+    pub fn supports_spatial(&self) -> bool {
+        matches!(
+            self.format,
+            wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Bgra8Unorm
+        )
+    }
+
+    fn spatial_on(&self) -> bool {
+        self.spatial != SpatialAa::None && !self.taa_on && self.supports_spatial()
     }
 
     /// The world's rendered size and the size it is shown at (TAA's history).
@@ -308,7 +342,7 @@ impl Post {
         window: [u32; 2],
         always: bool,
     ) -> Option<(wgpu::TextureView, wgpu::TextureView)> {
-        if self.scale == 1.0 && !self.antialias && !self.taa_on && !always {
+        if self.scale == 1.0 && !self.antialias && !self.taa_on && !self.spatial_on() && !always {
             self.target = None;
             return None;
         }
@@ -431,43 +465,107 @@ impl Post {
         })
     }
 
-    /// Draw the scaled world onto `screen`, through TAA when this frame's `jitter` had it on.
+    /// Draw the scaled world onto `screen`, through TAA when this frame's `jitter` had it on,
+    /// then SMAA or CMAA2 when chosen, and FSR when the picture is smaller than the window or
+    /// FSR's native anti-aliasing is on.
     pub fn finish(
-        &self,
+        &mut self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         screen: &wgpu::TextureView,
+        window: [u32; 2],
     ) {
         let Some(target) = &self.target else { return };
-        let Some(taa) = target.taa.as_ref().filter(|_| self.taa_previous.is_some()) else {
-            self.finish_with(encoder, screen, &target.group);
-            return;
+        let temporal = target
+            .taa
+            .as_ref()
+            .zip(self.taa_resources.as_ref())
+            .filter(|_| self.taa_previous.is_some());
+        let (mut source, size, mut group) = match temporal {
+            Some((taa, res)) => {
+                let i = (self.taa_frame % 2) as usize;
+                queue.write_buffer(&res.uniform, 0, bytemuck::bytes_of(&self.taa_this_frame));
+                let attachments = [Some(wgpu::RenderPassColorAttachment {
+                    view: &taa.history[i],
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })];
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Horizon TAA"),
+                    color_attachments: &attachments,
+                    ..Default::default()
+                });
+                pass.set_pipeline(&res.pipeline);
+                pass.set_bind_group(0, &taa.resolve[i], &[]);
+                pass.draw(0..3, 0..1);
+                drop(pass);
+                (&taa.history[i], taa.size, &taa.show[i])
+            }
+            None => (&target.color, target.size, &target.group),
         };
-        let Some(res) = &self.taa_resources else {
-            self.finish_with(encoder, screen, &target.group);
+        let temporal = temporal.is_some();
+        if !temporal && self.spatial != SpatialAa::None && self.supports_spatial() {
+            let usage = match self.spatial {
+                SpatialAa::Cmaa2 => Cmaa2::output_usage(self.format),
+                _ => wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            };
+            if self
+                .filtered
+                .as_ref()
+                .is_none_or(|f| f.size != size || f.mode != self.spatial)
+            {
+                let view = device
+                    .create_texture(&wgpu::TextureDescriptor {
+                        label: Some("Horizon spatial AA"),
+                        size: wgpu::Extent3d {
+                            width: size[0],
+                            height: size[1],
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: self.format,
+                        usage,
+                        view_formats: &[],
+                    })
+                    .create_view(&Default::default());
+                let bound = self.bind(device, &view);
+                self.filtered = Some(Filtered {
+                    size,
+                    mode: self.spatial,
+                    view,
+                    group: bound,
+                });
+            }
+            if let Some(filtered) = &self.filtered {
+                match self.spatial {
+                    SpatialAa::Smaa => self
+                        .smaa
+                        .get_or_insert_with(|| Smaa::new(device, queue, self.format))
+                        .encode(device, encoder, source, size, &filtered.view),
+                    _ => self
+                        .cmaa2
+                        .get_or_insert_with(|| Cmaa2::new(device, queue, self.format))
+                        .encode(device, encoder, source, size, &filtered.view),
+                }
+                source = &filtered.view;
+                group = &filtered.group;
+            }
+        }
+        let upscaling = size[0] < window[0] || size[1] < window[1];
+        if upscaling || (self.fsr && temporal) {
+            self.fsr_pass
+                .get_or_insert_with(|| Fsr::new(device, self.format))
+                .encode(device, encoder, source, size, screen, window, FSR_SHARPNESS);
             return;
-        };
-        let i = (self.taa_frame % 2) as usize;
-        queue.write_buffer(&res.uniform, 0, bytemuck::bytes_of(&self.taa_this_frame));
-        let attachments = [Some(wgpu::RenderPassColorAttachment {
-            view: &taa.history[i],
-            resolve_target: None,
-            depth_slice: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                store: wgpu::StoreOp::Store,
-            },
-        })];
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("Horizon TAA"),
-            color_attachments: &attachments,
-            ..Default::default()
-        });
-        pass.set_pipeline(&res.pipeline);
-        pass.set_bind_group(0, &taa.resolve[i], &[]);
-        pass.draw(0..3, 0..1);
-        drop(pass);
-        self.finish_with(encoder, screen, &taa.show[i]);
+        }
+        self.finish_with(encoder, screen, group);
     }
 
     /// Draw what `group` binds (`bind`) onto `screen`.

@@ -257,3 +257,77 @@ fn benchmark_padded_reuse() {
         }
     }
 }
+
+#[test]
+#[ignore = "requires prepared 26.3 resources (HORIZON_MESH_TEST_RESOURCES or .local/horizon-client/26.3)"]
+fn greedy_meshing_covers_the_same_unit_quads_with_fewer_vertices() {
+    let root = std::env::var_os("HORIZON_MESH_TEST_RESOURCES")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../.local/horizon-client/26.3")
+        });
+    let assets = Assets::load(&root).unwrap();
+    let facts = BlockFacts::load(&root, assets.registry).unwrap();
+    let biomes = Biomes::load(&root).unwrap();
+    let render = assets.reload(&root).unwrap();
+    let visibility = crate::models::load_visibility(&root, assets.registry).unwrap();
+    let tables = MeshTables::new(&assets, &render, &facts, visibility.clone()).unwrap();
+    let state = |name| assets.registry.default_state(name).unwrap().0;
+    let mut chunk = Chunk::empty(0, 0);
+    for y in 0..6 {
+        for z in 0..16 {
+            for x in 0..16 {
+                let name = if (x * 7 + z * 3 + y) % 11 == 0 {
+                    "minecraft:oak_planks"
+                } else {
+                    "minecraft:stone"
+                };
+                chunk.set(x, MIN_Y + y, z, state(name));
+            }
+        }
+    }
+    let mut region = [[None; 3]; 3];
+    region[1][1] = Some(&chunk);
+    let mut mesher = Mesher {
+        nether_shading: false,
+        shader_pack_lighting: false,
+        assets: &assets,
+        render: &render,
+        tables: &tables,
+        biomes: &biomes,
+        visibility,
+        zoom: BiomeZoom::new(0),
+        blend_radius: 0,
+        smooth_lighting: true,
+        cutout_leaves: true,
+    };
+    let mut build = |greedy| {
+        mesher.mesh_section(
+            &region,
+            0,
+            SectionMesh::default(),
+            &mut MeshScratch::default(),
+            greedy,
+        )
+    };
+    let (plain, merged) = (build(false), build(true));
+    let units = |solid: &[TerrainVertex]| {
+        let mut all = Vec::new();
+        for quad in solid.as_chunks::<4>().0 {
+            greedy::split(quad, |q| {
+                all.push(q.map(|v| (v.pos, v.uv, v.layer, v.color, v.light)))
+            });
+        }
+        all.sort_unstable();
+        all
+    };
+    assert_eq!(units(&plain.solid), units(&merged.solid));
+    assert!(merged.solid.len() < plain.solid.len());
+    set_binary_greedy(true);
+    let binary = build(true);
+    set_binary_greedy(false);
+    assert_eq!(units(&binary.solid), units(&plain.solid));
+    assert_eq!(binary.solid.len(), merged.solid.len());
+    assert_eq!(binary.translucent.len(), merged.translucent.len());
+}

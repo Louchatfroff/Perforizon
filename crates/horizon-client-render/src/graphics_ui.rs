@@ -2,7 +2,10 @@
 //! they show, in what groups, with what description and cost, and their
 //! input. How they look comes from `graphics_style`.
 use crate::{
-    graphics::{FarDetail, GraphicsApi, Overlay, Pacing, PresentMode, Preset, Upscaling},
+    graphics::{
+        FarDetail, GraphicsApi, MAX_FAR_TERRAIN_DISTANCE, MAX_LEAF_DISTANCE, Overlay, Pacing,
+        PresentMode, Preset, SpatialAa, Upscaling,
+    },
     graphics_style::{Cost, STYLE},
     hud::{HudAtlas, HudBatch},
     lang,
@@ -28,6 +31,8 @@ pub enum H {
     CaveCulling,
     EntityCulling,
     ChunkUpdates,
+    LeafDistance,
+    FarTerrainDistance,
     UploadBudget,
     Sky,
     Fog,
@@ -36,6 +41,8 @@ pub enum H {
     DitherCutoutMips,
     PresentMode,
     Pacing,
+    FrameLatency,
+    LatencyHud,
     Workers,
     Overlay,
     ResolutionScale,
@@ -55,7 +62,22 @@ pub enum H {
     HdrUiBrightness,
     BatteryMode,
     ShadowCache,
+    MeshShaders,
+    BinaryGreedy,
+    VertexPool,
+    HizOcclusion,
+    GpuParticles,
+    ShadowIndirect,
+    FarLodCoarse,
+    TextureCompression,
+    NetLowLatency,
+    PipelineCache,
     GraphicsApi,
+    OptimizationMode,
+    /// Runs the in-game auto-tune (`Action::RunAutotune`).
+    AutoTune,
+    /// Runs the precise auto-tune (`Action::RunPreciseAutotune`).
+    PreciseAutoTune,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,6 +224,16 @@ pub fn rows(level: Level) -> Vec<Row> {
                 Low,
                 "Meshed sections uploaded per frame. Lower is smoother while loading.",
             ),
+            h(
+                H::LeafDistance,
+                Low,
+                "Leaves farther than this draw solid, not cut out. Performance mode.",
+            ),
+            h(
+                H::FarTerrainDistance,
+                Low,
+                "Experimental: far terrain tiles replace sections past this. 0 = off.",
+            ),
             Row::Header("Quality"),
             v(
                 Opt::SmoothLighting,
@@ -306,6 +338,11 @@ pub fn rows(level: Level) -> Vec<Row> {
                 None,
                 "Efficient sleeps until the next frame; Precise spins, like vanilla.",
             ),
+            h(
+                H::FrameLatency,
+                None,
+                "Frames the GPU may queue: 1 is the least input lag, 2 and 3 smooth out spikes.",
+            ),
             v(Opt::Fullscreen, None, "Fills the screen (borderless)."),
             gui,
             v(Opt::Gamma, None, "Brightens dark places."),
@@ -332,6 +369,61 @@ pub fn rows(level: Level) -> Vec<Row> {
                 "Reuses the pack shadow map when sun, view and world match. Off by default.",
             ),
             h(
+                H::MeshShaders,
+                Saves,
+                "Draws opaque terrain with mesh shaders where the GPU has them (Vulkan).",
+            ),
+            h(
+                H::BinaryGreedy,
+                Saves,
+                "Merges faces without sorting: less meshing time. Off until auto-tune.",
+            ),
+            h(
+                H::VertexPool,
+                Saves,
+                "One big terrain buffer: fewer draw runs. Off until auto-tune.",
+            ),
+            h(
+                H::HizOcclusion,
+                Saves,
+                "Skips hidden sections early from last frame's depth. Off until auto-tune.",
+            ),
+            h(
+                H::GpuParticles,
+                Saves,
+                "Builds particle quads on the GPU: less CPU. Off until auto-tune.",
+            ),
+            h(
+                H::ShadowIndirect,
+                Saves,
+                "Culls shader-pack shadow draws on the GPU. Off until auto-tune.",
+            ),
+            h(
+                H::FarLodCoarse,
+                Saves,
+                "Coarser far terrain tiles, fewer triangles. Off until auto-tune.",
+            ),
+            h(
+                H::NetLowLatency,
+                Saves,
+                "Sends small packets together once per frame and tick. Off by default.",
+            ),
+            h(
+                H::TextureCompression,
+                Saves,
+                "Packs block textures as BC7: less video memory, lossy. Off until auto-tune.",
+            ),
+            h(
+                H::PipelineCache,
+                None,
+                "Keeps compiled GPU pipelines on disk (Vulkan). Next start. Off by default.",
+            ),
+            h(
+                H::LatencyHud,
+                None,
+                "Shows input-to-screen delay: average and worst. Off by default.",
+            ),
+            h(
                 H::Workers,
                 None,
                 "Threads that generate, light and mesh chunks. Next start.",
@@ -345,6 +437,22 @@ pub fn rows(level: Level) -> Vec<Row> {
                 H::UploadBudget,
                 Low,
                 "Mesh data sent to the GPU per frame. Lower is smoother while loading.",
+            ),
+            Row::Header("Auto-tune"),
+            h(
+                H::OptimizationMode,
+                None,
+                "Performance may change pixels slightly. Exact parity keeps them identical.",
+            ),
+            h(
+                H::AutoTune,
+                None,
+                "Tests settings in this world for up to two minutes and keeps the best.",
+            ),
+            h(
+                H::PreciseAutoTune,
+                None,
+                "Slow: benchmark scenes, 3 passes each. Click again to cancel.",
             ),
             Row::Header("Overlay"),
             h(
@@ -386,6 +494,28 @@ const LOD_STEPS: [u32; 18] = [
     2097152,
     crate::lod::MAX_CHUNKS,
 ];
+
+const AA_LABELS: [&str; 6] = ["Off", "FXAA", "SMAA", "CMAA2", "TAA", "FSR"];
+fn aa_index(g: &crate::graphics::Graphics) -> usize {
+    match (g.taa, g.fsr, g.spatial_aa, g.fxaa) {
+        (true, true, ..) => 5,
+        (true, ..) => 4,
+        (_, _, SpatialAa::Cmaa2, _) => 3,
+        (_, _, SpatialAa::Smaa, _) => 2,
+        (_, _, _, true) => 1,
+        _ => 0,
+    }
+}
+fn set_aa(g: &mut crate::graphics::Graphics, i: usize) {
+    g.fxaa = i == 1;
+    g.spatial_aa = match i {
+        2 => SpatialAa::Smaa,
+        3 => SpatialAa::Cmaa2,
+        _ => SpatialAa::None,
+    };
+    g.taa = i >= 4;
+    g.fsr = i == 5;
+}
 
 /// Horizon's graphics screens supplement the vanilla options on Video Settings.
 /// Upscaling is only there while TAA is, which does it.
@@ -464,6 +594,10 @@ impl H {
         let g = &s.horizon;
         match self {
             H::ChunkUpdates => Some(g.chunk_updates as f32 / 64.0),
+            H::LeafDistance => Some(g.leaf_distance as f32 / MAX_LEAF_DISTANCE as f32),
+            H::FarTerrainDistance => {
+                Some(g.far_terrain_distance as f32 / MAX_FAR_TERRAIN_DISTANCE as f32)
+            }
             H::UploadBudget => {
                 let i = UPLOAD_STEPS
                     .iter()
@@ -495,6 +629,8 @@ impl H {
     pub fn slider_steps(self) -> Option<u32> {
         match self {
             H::ChunkUpdates => Some(64),
+            H::LeafDistance => Some(MAX_LEAF_DISTANCE),
+            H::FarTerrainDistance => Some(MAX_FAR_TERRAIN_DISTANCE),
             H::UploadBudget => Some((UPLOAD_STEPS.len() - 1) as u32),
             H::Workers => Some(max_workers()),
             H::ResolutionScale => Some(30),
@@ -527,6 +663,14 @@ impl H {
                 }
                 k => labelled("Upload Budget", lang::tr("%s KiB/frame", &[&k])),
             },
+            H::LeafDistance => match g.leaf_distance {
+                0 => labelled("Fancy Leaf Distance", "Always"),
+                n => labelled("Fancy Leaf Distance", lang::tr("%s chunks", &[&n])),
+            },
+            H::FarTerrainDistance => match g.far_terrain_distance {
+                0 => labelled("Full Detail Distance", "Off"),
+                n => labelled("Full Detail Distance", lang::tr("%s chunks", &[&n])),
+            },
             H::Sky => labelled("Sky", on_off(g.sky)),
             H::Fog => labelled("Fog", on_off(g.fog)),
             H::Weather => labelled("Weather", on_off(g.weather)),
@@ -540,6 +684,11 @@ impl H {
                     Pacing::Precise => "Precise",
                 },
             ),
+            H::FrameLatency => match g.frame_latency {
+                0 => labelled("Frame Latency", "Auto"),
+                n => labelled("Frame Latency", n),
+            },
+            H::LatencyHud => labelled("Latency Counter", on_off(g.latency_hud)),
             H::Workers => match g.workers {
                 0 => labelled(
                     "Worker Threads",
@@ -548,20 +697,16 @@ impl H {
                 n => labelled("Worker Threads", n),
             },
             H::ResolutionScale => labelled("Resolution Scale", format!("{}%", g.resolution_scale)),
-            H::Antialiasing => labelled(
-                "Anti-aliasing",
-                match (g.fxaa, g.taa) {
-                    (_, true) => "TAA",
-                    (true, false) => "FXAA",
-                    (false, false) => "Off",
-                },
-            ),
+            H::Antialiasing => labelled("Anti-aliasing", AA_LABELS[aa_index(g)]),
             H::Upscaling => labelled("Upscaling", g.upscaling.label()),
             H::ScreenshotQuality => {
                 labelled("Screenshot Quality", format!("{}x", g.screenshot_quality))
             }
             H::Hdr => labelled("HDR", on_off(g.hdr)),
             H::HdrSettings => Text::literal(lang::get("HDR Settings...")),
+            H::OptimizationMode => labelled("Optimization Mode", g.optimization_mode.label()),
+            H::AutoTune => Text::literal(lang::get("Run Auto-tune...")),
+            H::PreciseAutoTune => Text::literal(lang::get("Run Precise Auto-tune...")),
             H::HdrCalibrate => Text::literal(lang::get(match setup(s) {
                 Setup::Unknown => "Calibrate...",
                 Setup::Automatic => "Calibrate Anyway...",
@@ -594,6 +739,16 @@ impl H {
             }
             H::BatteryMode => labelled("Battery Mode", on_off(g.battery)),
             H::ShadowCache => labelled("Shadow Cache", on_off(g.shadow_cache)),
+            H::MeshShaders => labelled("Mesh Shaders", on_off(g.mesh_shaders)),
+            H::BinaryGreedy => labelled("Binary Greedy Meshing", on_off(g.binary_greedy)),
+            H::VertexPool => labelled("Vertex Pool", on_off(g.vertex_pool)),
+            H::HizOcclusion => labelled("Hi-Z Occlusion", on_off(g.hiz_occlusion)),
+            H::GpuParticles => labelled("GPU Particles", on_off(g.gpu_particles)),
+            H::ShadowIndirect => labelled("Shadow GPU Culling", on_off(g.shadow_indirect)),
+            H::FarLodCoarse => labelled("Coarse Far Terrain", on_off(g.far_lod_coarse)),
+            H::TextureCompression => labelled("Texture Compression", on_off(g.texture_compression)),
+            H::NetLowLatency => labelled("Batch Network Packets", on_off(g.net_low_latency)),
+            H::PipelineCache => labelled("Pipeline Cache", on_off(g.pipeline_cache)),
             H::GraphicsApi => labelled("Graphics API", g.api.label()),
             H::Overlay => labelled(
                 "Performance Overlay",
@@ -609,6 +764,10 @@ impl H {
         let g = &mut s.horizon;
         match self {
             H::ChunkUpdates => g.chunk_updates = (v * 64.0).round() as u32,
+            H::LeafDistance => g.leaf_distance = (v * MAX_LEAF_DISTANCE as f32).round() as u32,
+            H::FarTerrainDistance => {
+                g.far_terrain_distance = (v * MAX_FAR_TERRAIN_DISTANCE as f32).round() as u32
+            }
             H::UploadBudget => {
                 g.upload_budget_kib =
                     UPLOAD_STEPS[(v * (UPLOAD_STEPS.len() - 1) as f32).round() as usize]
@@ -655,11 +814,10 @@ impl H {
             H::AnimatedTextures => g.animated_textures = !g.animated_textures,
             H::DitherCutoutMips => g.dither_cutout_mips = !g.dither_cutout_mips,
             H::PresentMode => g.present_mode = step(&PresentMode::ALL, g.present_mode, back),
-            // Off, FXAA, TAA.
             H::Antialiasing => {
-                let i = if g.taa { 2 } else { usize::from(g.fxaa) };
-                let i = (i + if back { 2 } else { 1 }) % 3;
-                (g.fxaa, g.taa) = (i == 1, i == 2);
+                let n = AA_LABELS.len();
+                let i = (aa_index(g) + if back { n - 1 } else { 1 }) % n;
+                set_aa(g, i);
                 if !g.taa {
                     g.upscaling = Upscaling::Native;
                 }
@@ -681,7 +839,26 @@ impl H {
             H::Hdr => g.hdr = !g.hdr,
             H::BatteryMode => g.battery = !g.battery,
             H::ShadowCache => g.shadow_cache = !g.shadow_cache,
+            H::LatencyHud => g.latency_hud = !g.latency_hud,
+            H::MeshShaders => g.mesh_shaders = !g.mesh_shaders,
+            H::BinaryGreedy => g.binary_greedy = !g.binary_greedy,
+            H::VertexPool => g.vertex_pool = !g.vertex_pool,
+            H::HizOcclusion => g.hiz_occlusion = !g.hiz_occlusion,
+            H::GpuParticles => g.gpu_particles = !g.gpu_particles,
+            H::ShadowIndirect => g.shadow_indirect = !g.shadow_indirect,
+            H::FarLodCoarse => g.far_lod_coarse = !g.far_lod_coarse,
+            H::TextureCompression => g.texture_compression = !g.texture_compression,
+            H::NetLowLatency => g.net_low_latency = !g.net_low_latency,
+            H::PipelineCache => g.pipeline_cache = !g.pipeline_cache,
+            H::OptimizationMode => g.optimization_mode = g.optimization_mode.toggled(),
             H::GraphicsApi => g.api = step(GraphicsApi::choices(), g.api, back),
+            H::FrameLatency => {
+                g.frame_latency = match g.frame_latency {
+                    0 => 2,
+                    2 => 3,
+                    _ => 0,
+                }
+            }
             H::Pacing => {
                 g.pacing = match g.pacing {
                     Pacing::Efficient => Pacing::Precise,
@@ -745,6 +922,17 @@ impl Item {
             Item::Horizon(H::Hdr) => g.hdr,
             Item::Horizon(H::BatteryMode) => g.battery,
             Item::Horizon(H::ShadowCache) => g.shadow_cache,
+            Item::Horizon(H::LatencyHud) => g.latency_hud,
+            Item::Horizon(H::MeshShaders) => g.mesh_shaders,
+            Item::Horizon(H::BinaryGreedy) => g.binary_greedy,
+            Item::Horizon(H::VertexPool) => g.vertex_pool,
+            Item::Horizon(H::HizOcclusion) => g.hiz_occlusion,
+            Item::Horizon(H::GpuParticles) => g.gpu_particles,
+            Item::Horizon(H::ShadowIndirect) => g.shadow_indirect,
+            Item::Horizon(H::FarLodCoarse) => g.far_lod_coarse,
+            Item::Horizon(H::TextureCompression) => g.texture_compression,
+            Item::Horizon(H::NetLowLatency) => g.net_low_latency,
+            Item::Horizon(H::PipelineCache) => g.pipeline_cache,
             Item::Vanilla(Opt::ViewBobbing) => s.view_bobbing,
             Item::Vanilla(Opt::Vsync) => s.vsync,
             Item::Vanilla(Opt::Fullscreen) => s.fullscreen,
@@ -802,11 +990,26 @@ impl Item {
                     | H::Overlay
                     | H::ScreenshotQuality
                     | H::Pacing
+                    | H::FrameLatency
+                    | H::LatencyHud
                     | H::PresentMode
                     | H::Workers
                     | H::BatteryMode
                     | H::ShadowCache
+                    | H::MeshShaders
+                    | H::BinaryGreedy
+                    | H::VertexPool
+                    | H::HizOcclusion
+                    | H::GpuParticles
+                    | H::ShadowIndirect
+                    | H::FarLodCoarse
+                    | H::TextureCompression
+                    | H::NetLowLatency
+                    | H::PipelineCache
                     | H::GraphicsApi
+                    | H::OptimizationMode
+                    | H::AutoTune
+                    | H::PreciseAutoTune
             ) | Item::Vanilla(
                 Opt::GuiScale
                     | Opt::Fullscreen
@@ -874,6 +1077,9 @@ pub enum Action {
     BindKey(&'static str),
     /// Start HDR calibration.
     Calibrate,
+    /// Start the in-game auto-tune.
+    RunAutotune,
+    RunPreciseAutotune,
     Done,
 }
 
@@ -1174,6 +1380,14 @@ impl GraphicsUi {
                     self.can_change_value = false;
                     vec![Action::ButtonClick, Action::OpenHdr]
                 }
+                Target::Item(Item::Horizon(H::AutoTune)) => {
+                    self.can_change_value = false;
+                    vec![Action::ButtonClick, Action::RunAutotune]
+                }
+                Target::Item(Item::Horizon(H::PreciseAutoTune)) => {
+                    self.can_change_value = false;
+                    vec![Action::ButtonClick, Action::RunPreciseAutotune]
+                }
                 Target::Item(Item::Horizon(H::HdrCalibrate)) if setup(s) == Setup::Changed => {
                     s.horizon.hdr_peak = 0;
                     s.horizon.hdr_paper_white = 0;
@@ -1241,7 +1455,10 @@ impl GraphicsUi {
             if item.slider(s).is_some() {
                 item.step_slider(s, amount > 0.0, w);
                 return vec![Action::SliderDrag, Action::Changed];
-            } else if !matches!(item, Item::Horizon(H::HdrSettings)) {
+            } else if !matches!(
+                item,
+                Item::Horizon(H::HdrSettings | H::AutoTune | H::PreciseAutoTune)
+            ) {
                 item.cycle(s, amount > 0.0, framebuffer);
                 return vec![Action::ButtonClick, Action::Changed];
             }
@@ -1261,7 +1478,10 @@ impl GraphicsUi {
             && item.available()
             && item.blocked(s).is_none()
             && item.slider(s).is_none()
-            && !matches!(item, Item::Horizon(H::HdrSettings))
+            && !matches!(
+                item,
+                Item::Horizon(H::HdrSettings | H::AutoTune | H::PreciseAutoTune)
+            )
         {
             if amount != 0.0 {
                 item.cycle(s, amount > 0.0, framebuffer);
@@ -1435,6 +1655,10 @@ impl GraphicsUi {
                         return (Vec::new(), true);
                     } else if item == Item::Horizon(H::HdrSettings) {
                         return (vec![Action::ButtonClick, Action::OpenHdr], true);
+                    } else if item == Item::Horizon(H::AutoTune) {
+                        return (vec![Action::ButtonClick, Action::RunAutotune], true);
+                    } else if item == Item::Horizon(H::PreciseAutoTune) {
+                        return (vec![Action::ButtonClick, Action::RunPreciseAutotune], true);
                     } else {
                         item.cycle(s, shift, framebuffer);
                         return (vec![Action::ButtonClick, Action::Changed], true);
@@ -1795,13 +2019,18 @@ mod tests {
     }
 
     #[test]
-    fn antialiasing_cycles_off_fxaa_taa() {
+    fn antialiasing_cycles_through_every_mode() {
         let mut s = Settings::default();
         let item = Item::Horizon(H::Antialiasing);
-        for label in ["FXAA", "TAA", "Off"] {
+        for label in ["FXAA", "SMAA", "CMAA2", "TAA", "FSR", "Off"] {
             item.cycle(&mut s, false, [854, 480]);
             assert_eq!(item.label(&s).plain(), format!("Anti-aliasing: {label}"));
         }
+        item.cycle(&mut s, true, [854, 480]);
+        assert_eq!(
+            (s.horizon.taa, s.horizon.fsr, s.horizon.spatial_aa),
+            (true, true, SpatialAa::None)
+        );
         item.cycle(&mut s, true, [854, 480]);
         assert_eq!((s.horizon.fxaa, s.horizon.taa), (false, true));
 
@@ -1811,6 +2040,8 @@ mod tests {
         upscaling.cycle(&mut s, false, [854, 480]);
         assert_eq!(upscaling.label(&s).plain(), "Upscaling: Quality");
         assert!(s.horizon.taa);
+        item.cycle(&mut s, false, [854, 480]);
+        assert_eq!(item.label(&s).plain(), "Anti-aliasing: FSR");
         item.cycle(&mut s, false, [854, 480]);
         assert_eq!(s.horizon.upscaling, Upscaling::Native);
 
@@ -1865,6 +2096,60 @@ mod tests {
             assert_eq!(s.horizon.preset, Preset::Custom);
         }
         assert_eq!(item.label(&s).plain(), "Entity Culling: On");
+    }
+
+    #[test]
+    fn mesh_shaders_default_off_and_toggle_from_advanced_graphics_without_leaving_the_preset() {
+        let mut s = Settings::default();
+        let item = Item::Horizon(H::MeshShaders);
+        assert_eq!(item.switch(&s), Some(false));
+        assert_eq!(item.label(&s).plain(), "Mesh Shaders: Off");
+        let row = rows(Level::Advanced)
+            .into_iter()
+            .find_map(|row| match row {
+                Row::Setting(r) if r.item == item => Some(r),
+                _ => None,
+            })
+            .expect("Advanced graphics lists Mesh Shaders");
+        assert_eq!(row.cost, Cost::Saves);
+        assert!(!row.text.is_empty());
+        assert!(
+            !rows(Level::Simple)
+                .iter()
+                .any(|row| matches!(row, Row::Setting(r) if r.item == item))
+        );
+        for preset in Preset::ALL {
+            crate::graphics::apply_preset(preset, &mut s);
+            assert!(!s.horizon.mesh_shaders);
+        }
+
+        let mut ui = GraphicsUi::default();
+        let size = (480.0, 4000.0);
+        let (widgets, _, _) = ui.layout(Level::Advanced, &s, size.0, size.1);
+        let switch = widgets
+            .iter()
+            .find(|w| matches!(w.target, Target::Item(i) if i == item))
+            .unwrap();
+        let point = (switch.x + 1.0, switch.y + 1.0);
+        s.horizon.preset = Preset::Balanced;
+        for enabled in [true, false] {
+            assert_eq!(
+                ui.click(
+                    Level::Advanced,
+                    &mut s,
+                    point,
+                    size,
+                    [854, 480],
+                    false,
+                    false
+                ),
+                vec![Action::ButtonClick, Action::Changed]
+            );
+            assert_eq!(item.switch(&s), Some(enabled));
+            assert_eq!(s.horizon.mesh_shaders, enabled);
+            assert_eq!(s.horizon.preset, Preset::Balanced);
+        }
+        assert_eq!(item.label(&s).plain(), "Mesh Shaders: Off");
     }
 
     #[test]

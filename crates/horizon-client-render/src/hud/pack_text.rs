@@ -196,7 +196,7 @@ impl PackText {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: crate::gfx::pipeline_cache::get(),
         });
         if let Some(e) = pollster::block_on(scope.pop()) {
             log::warn!("the resource pack's text shader is not used: {e}");

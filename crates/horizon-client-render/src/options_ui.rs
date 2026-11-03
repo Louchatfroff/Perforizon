@@ -1245,6 +1245,8 @@ pub enum Page {
     Graphics,
     GraphicsAdvanced,
     GraphicsHdr,
+    /// Latency and display options for PvP (`pvp`).
+    Pvp,
     /// HDR calibration, full screen (`calibration`).
     HdrCalibration,
     /// Horizon's controller settings and button binds.
@@ -1272,6 +1274,7 @@ enum Act {
     Done,
     Cycle(Opt),
     Extra(crate::extras::Item),
+    Pvp(&'static str),
     Key(&'static str),
     ResetKey(&'static str),
     ResetKeys,
@@ -1433,6 +1436,9 @@ pub enum Event {
     Credits,
     /// Copy how an agent connects (the AI Agent page).
     CopyAgentDetails,
+    /// Advanced graphics' Run Auto-tune: the game starts the auto-tune driver.
+    RunAutotune,
+    RunPreciseAutotune,
     /// The narrator option changed (after its `Changed`): the option's
     /// `onValueUpdate`, `GameNarrator.updateNarratorStatus`.
     Narrator,
@@ -2162,6 +2168,7 @@ impl OptionsUi {
             Page::Controller => "horizon.pages.controller",
             Page::PadBinds => "horizon.pages.controller_binds",
             Page::Extras => "horizon.pages.extras",
+            Page::Pvp => "PvP",
             Page::Credits => "credits_and_attribution.screen.title",
             Page::Horizon => "horizon.pages.settings",
             Page::Agent => "horizon.pages.agent",
@@ -2300,6 +2307,22 @@ impl OptionsUi {
                 flush(&mut rows, &mut section);
                 rows
             }
+            Page::Pvp => {
+                let pvp = |key: &'static str| {
+                    let value = s.pvp.get(key).unwrap_or_default();
+                    let value = match value.as_str() {
+                        "true" => "On".to_owned(),
+                        "false" => "Off".to_owned(),
+                        _ => value,
+                    };
+                    let label = format!("{}: {value}", crate::pvp::Pvp::caption(key));
+                    button(0.0, 0.0, 150.0, Text::literal(label), Act::Pvp(key))
+                };
+                crate::pvp::Pvp::KEYS
+                    .chunks(2)
+                    .map(|c| Row::Buttons(pvp(c[0]), c.get(1).map(|&k| pvp(k))))
+                    .collect()
+            }
             Page::Horizon => {
                 // Two to a row, as vanilla's OptionsList.addSmall lays out
                 // buttons; each opens a page built from vanilla's widgets.
@@ -2320,6 +2343,10 @@ impl OptionsUi {
                     Row::Buttons(
                         open("horizon.pages.open.extras", Page::Extras),
                         Some(open("horizon.pages.open.mods", Page::Mods)),
+                    ),
+                    Row::Buttons(
+                        button(0.0, 0.0, 150.0, Text::literal("PvP"), Act::Push(Page::Pvp)),
+                        None,
                     ),
                     // No AI hides the AI Agent page and everything AI.
                     Row::Buttons(
@@ -3666,6 +3693,8 @@ impl OptionsUi {
                     Action::SliderDrag => events.push(Event::SliderDrag),
                     Action::OpenAdvanced => self.push(Page::GraphicsAdvanced),
                     Action::OpenHdr => self.push(Page::GraphicsHdr),
+                    Action::RunAutotune => events.push(Event::RunAutotune),
+                    Action::RunPreciseAutotune => events.push(Event::RunPreciseAutotune),
                     Action::BindKey(name) => self.selected_key = Some(name),
                     Action::Calibrate => {
                         self.calibration = Some(crate::hdr_calibration::Calibration::new(s));
@@ -3874,6 +3903,10 @@ impl OptionsUi {
                                 item.cycle(&mut s.extras, right);
                                 events.push(Event::Changed);
                             }
+                        }
+                        Act::Pvp(key) => {
+                            s.pvp.cycle(key, right);
+                            events.push(Event::Changed);
                         }
                         Act::Key(name) => self.selected_key = Some(name),
                         Act::ResetKey(name) => {
@@ -4101,6 +4134,8 @@ impl OptionsUi {
                     Action::SliderDrag => events.push(Event::SliderDrag),
                     Action::OpenAdvanced => self.push(Page::GraphicsAdvanced),
                     Action::OpenHdr => self.push(Page::GraphicsHdr),
+                    Action::RunAutotune => events.push(Event::RunAutotune),
+                    Action::RunPreciseAutotune => events.push(Event::RunPreciseAutotune),
                     Action::OpenSimple => {
                         if self.stack.len() >= 2
                             && self.stack[self.stack.len() - 2] == Page::Graphics
@@ -4531,6 +4566,8 @@ impl OptionsUi {
                     Action::SliderDrag => events.push(Event::SliderDrag),
                     Action::OpenAdvanced => self.push(Page::GraphicsAdvanced),
                     Action::OpenHdr => self.push(Page::GraphicsHdr),
+                    Action::RunAutotune => events.push(Event::RunAutotune),
+                    Action::RunPreciseAutotune => events.push(Event::RunPreciseAutotune),
                     Action::OpenSimple => {
                         if self.stack.len() >= 2
                             && self.stack[self.stack.len() - 2] == Page::Graphics
@@ -4792,6 +4829,10 @@ impl OptionsUi {
                                 item.cycle(&mut s.extras, shift);
                                 events.push(Event::Changed);
                             }
+                        }
+                        Act::Pvp(key) => {
+                            s.pvp.cycle(key, shift);
+                            events.push(Event::Changed);
                         }
                         Act::Key(name) => self.selected_key = Some(name),
                         Act::ResetKey(name) => {
@@ -6788,6 +6829,7 @@ mod tests {
                 Page::Controller,
                 Page::Extras,
                 Page::Mods,
+                Page::Pvp,
                 Page::Agent,
             ]
         );

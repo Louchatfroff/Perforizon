@@ -76,6 +76,9 @@ impl<T> Resident<T> {
     pub fn get(&self, slot: u32) -> &T {
         &self.items[slot as usize].1
     }
+    pub fn bounds(&self, slot: u32) -> Option<[Vec3; 2]> {
+        self.bounds[slot as usize]
+    }
     pub fn get_mut(&mut self, slot: u32) -> &mut T {
         &mut self.items[slot as usize].1
     }
@@ -193,7 +196,7 @@ fn camera_column(camera: DVec3) -> (i32, i32) {
 
 /// The world AABB (min, max) of a section from its origin and optional tight bounds.
 #[inline]
-fn section_box(min: Vec3, bounds: Option<[Vec3; 2]>) -> (Vec3, Vec3) {
+pub(super) fn section_box(min: Vec3, bounds: Option<[Vec3; 2]>) -> (Vec3, Vec3) {
     match bounds {
         Some([bmin, bmax]) => (min + bmin, min + bmax),
         None => (min, min + Vec3::splat(16.0)),

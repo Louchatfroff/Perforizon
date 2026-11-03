@@ -100,7 +100,7 @@ impl MenuBlur {
             depth_stencil: None,
             multisample: Default::default(),
             multiview_mask: None,
-            cache: None,
+            cache: crate::gfx::pipeline_cache::get(),
         });
         // The post chain's "bilinear": true inputs, clamped like render targets.
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {

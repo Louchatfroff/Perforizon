@@ -85,6 +85,50 @@ impl Uploads {
             },
         );
     }
+    pub fn blocks(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        destination: wgpu::TexelCopyTextureInfo<'_>,
+        width: u32,
+        height: u32,
+        blocks: &[u8],
+    ) {
+        let (across, down) = (width.div_ceil(4), height.div_ceil(4));
+        let row = across as usize * 16;
+        debug_assert_eq!(blocks.len(), row * down as usize);
+        let padded = row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize);
+        let Some(size) = NonZeroU64::new((padded * down as usize) as u64) else {
+            return;
+        };
+        let alignment = NonZeroU64::new(u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT))
+            .expect("non-zero alignment");
+        let slice = self.allocate(size, alignment);
+        {
+            let mut view = slice
+                .get_mapped_range_mut()
+                .expect("staging belt slices are mapped");
+            for (i, src) in blocks.chunks(row).enumerate() {
+                view.slice(i * padded..i * padded + row)
+                    .copy_from_slice(src);
+            }
+        }
+        encoder.copy_buffer_to_texture(
+            wgpu::TexelCopyBufferInfo {
+                buffer: slice.buffer(),
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: slice.offset(),
+                    bytes_per_row: Some(padded as u32),
+                    rows_per_image: Some(down),
+                },
+            },
+            destination,
+            wgpu::Extent3d {
+                width: across * 4,
+                height: down * 4,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
     /// Copy `bytes` into `target` at `offset`, as `Queue::write_buffer`
     /// would, in the encoder's order.
     pub fn buffer(

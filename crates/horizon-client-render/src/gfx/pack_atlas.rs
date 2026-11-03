@@ -113,23 +113,24 @@ impl PackAtlas {
     }
 }
 
-/// A `TerrainVertex` of flat draws' arena page (`hz_vertices`, six words each) into the vertex
+/// A `TerrainVertex` of flat draws' arena page (`hz_vertices`, five words each) into the vertex
 /// inputs, for vertex `hz_vertex_index`.
-pub const PULL: &str = "        uint hz_pw = hz_vertex_index * 6u;\n        \
-    hz_v_pos = uintBitsToFloat(uvec3(hz_vertices[hz_pw], hz_vertices[hz_pw + 1u], hz_vertices[hz_pw + 2u]));\n        \
-    hz_v_uv = uvec2(hz_vertices[hz_pw + 3u] & 65535u, hz_vertices[hz_pw + 3u] >> 16u);\n        \
-    hz_v_layer = hz_vertices[hz_pw + 4u] & 65535u;\n        \
-    uint hz_pl = hz_vertices[hz_pw + 4u] >> 16u;\n        \
+pub const PULL: &str = "        uint hz_pw = hz_vertex_index * 5u;\n        \
+    hz_v_raw = uvec4(hz_vertices[hz_pw] & 65535u, hz_vertices[hz_pw] >> 16u, hz_vertices[hz_pw + 1u] & 65535u, hz_vertices[hz_pw + 1u] >> 16u);\n        \
+    hz_v_uv = uvec2(hz_vertices[hz_pw + 2u] & 65535u, hz_vertices[hz_pw + 2u] >> 16u);\n        \
+    hz_v_mode = hz_vertices[hz_pw + 3u] >> 16u;\n        \
+    uint hz_pl = hz_vertices[hz_pw + 3u] & 65535u;\n        \
     hz_v_light = uvec2(hz_pl & 255u, hz_pl >> 8u);\n        \
-    hz_v_color = unpackUnorm4x8(hz_vertices[hz_pw + 5u]);\n";
+    hz_v_color = unpackUnorm4x8(hz_vertices[hz_pw + 4u]);\n";
 
 /// GLSL: the face normal and tangent of a flat-drawn vertex, from its quad's first three corners
-/// (quads are four consecutive vertices of the page; position words 0-2, UV word 3).
-const FACE: &str = "    uint hz_q = (uint(gl_VertexIndex) & ~3u) * 6u;\n    \
-    vec3 hz_p0 = uintBitsToFloat(uvec3(hz_vertices[hz_q], hz_vertices[hz_q + 1u], hz_vertices[hz_q + 2u]));\n    \
-    vec3 hz_p1 = uintBitsToFloat(uvec3(hz_vertices[hz_q + 6u], hz_vertices[hz_q + 7u], hz_vertices[hz_q + 8u]));\n    \
-    vec3 hz_p2 = uintBitsToFloat(uvec3(hz_vertices[hz_q + 12u], hz_vertices[hz_q + 13u], hz_vertices[hz_q + 14u]));\n    \
-    uvec3 hz_w = uvec3(hz_vertices[hz_q + 3u], hz_vertices[hz_q + 9u], hz_vertices[hz_q + 15u]);\n    \
+/// (quads are four consecutive vertices of the page; position words 0-1, UV word 2).
+const FACE: &str = "    uint hz_q = (uint(gl_VertexIndex) & ~3u) * 5u;\n    \
+    uint hz_m = hz_vertices[hz_q + 3u] >> 16u;\n    \
+    vec3 hz_p0 = hz_decode_pos(uvec3(hz_vertices[hz_q] & 65535u, hz_vertices[hz_q] >> 16u, hz_vertices[hz_q + 1u] & 65535u), hz_m);\n    \
+    vec3 hz_p1 = hz_decode_pos(uvec3(hz_vertices[hz_q + 5u] & 65535u, hz_vertices[hz_q + 5u] >> 16u, hz_vertices[hz_q + 6u] & 65535u), hz_m);\n    \
+    vec3 hz_p2 = hz_decode_pos(uvec3(hz_vertices[hz_q + 10u] & 65535u, hz_vertices[hz_q + 10u] >> 16u, hz_vertices[hz_q + 11u] & 65535u), hz_m);\n    \
+    uvec3 hz_w = uvec3(hz_vertices[hz_q + 2u], hz_vertices[hz_q + 7u], hz_vertices[hz_q + 12u]);\n    \
     vec2 hz_t0 = vec2(hz_w.x & 65535u, hz_w.x >> 16u);\n    \
     vec2 hz_d1 = vec2(hz_w.y & 65535u, hz_w.y >> 16u) - hz_t0;\n    \
     vec2 hz_d2 = vec2(hz_w.z & 65535u, hz_w.z >> 16u) - hz_t0;\n    \
@@ -152,9 +153,14 @@ impl PackAtlas {
     /// `vs_terrain` or, for `flat` draws, `vs_terrain_flat`), in atlas coordinates.
     pub fn terrain_inputs(&self, flat: bool) -> horizon_shaders::GbuffersInputs {
         let mut declarations = String::from(
-            "layout(location = 0) in vec3 hz_v_pos;\nlayout(location = 1) in uvec2 hz_v_uv;\n\
-             layout(location = 2) in uint hz_v_layer;\nlayout(location = 3) in vec4 hz_v_color;\n\
-             layout(location = 4) in uvec2 hz_v_light;\n",
+            "layout(location = 0) in uvec4 hz_v_raw;\nlayout(location = 1) in uvec2 hz_v_uv;\n\
+             layout(location = 2) in uint hz_v_mode;\nlayout(location = 3) in vec4 hz_v_color;\n\
+             layout(location = 4) in uvec2 hz_v_light;\n\
+             vec3 hz_decode_pos(uvec3 r, uint m) {\n    vec3 p = vec3(r);\n    \
+             m &= 32767u;\n    \
+             if (m == 0u) { return p * (1.0 / 1024.0) - 16.0; }\n    \
+             float s = uintBitsToFloat((m + 116u) << 23u);\n    \
+             return vec3((p.x - 16384.0) * s, p.y * (1.0 / 32.0) - 1024.0, (p.z - 16384.0) * s);\n}\n",
         );
         let origin = if flat {
             declarations.push_str(
@@ -162,7 +168,7 @@ impl PackAtlas {
                  layout(set = 1, binding = 1) readonly buffer HzSlotOrigins { vec4 hz_slot_origins[]; };\n",
             );
             // `mc_Entity` of each sprite layer: id, then 1 for fluids or -1 (the game's table),
-            // and the arena page's vertices (`TerrainVertex`, six words each).
+            // and the arena page's vertices (`TerrainVertex`, five words each).
             declarations.push_str(
                 "layout(set = 3, binding = 0) readonly buffer HzBlockIds { int hz_block_ids[]; };\n\
                  layout(set = 3, binding = 1) readonly buffer HzVertices { uint hz_vertices[]; };\n",
@@ -182,6 +188,8 @@ impl PackAtlas {
         // The colour's alpha holds HDR's emission level (`mesher::EMISSION_BITS`): packs get 1.
         let body = format!(
             "    vec4 hz_origin = {origin};\n    \
+             vec3 hz_v_pos = hz_decode_pos(hz_v_raw.xyz, hz_v_mode);\n    \
+             uint hz_v_layer = hz_v_raw.w;\n    \
              uint hz_layer = hz_v_layer & 32767u;\n    \
              hz_cell = vec2(float(hz_layer % {columns}u), float(hz_layer / {columns}u));\n    \
              hz_scale = vec2({:?}, {:?});\n    \

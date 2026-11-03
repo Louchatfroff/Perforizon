@@ -13,6 +13,7 @@ use std::{
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 thread_local! {
+    static LAST: RefCell<Option<Instant>> = const { RefCell::new(None) };
     static SPANS: RefCell<Vec<Span>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -46,6 +47,30 @@ pub fn time<T>(name: &'static str, f: impl FnOnce() -> T) -> T {
     SPANS.with(|s| s.borrow_mut().push(Span { name, ms, cpu_ms }));
     out
 }
+/// Starts a run of `mark`s at now.
+pub fn restart() {
+    if ENABLED.load(Ordering::Relaxed) {
+        LAST.with(|l| *l.borrow_mut() = Some(Instant::now()));
+    }
+}
+/// Records the time since the last `restart` or `mark` under `name`.
+pub fn mark(name: &'static str) {
+    if !ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    let now = Instant::now();
+    let Some(last) = LAST.with(|l| l.borrow_mut().replace(now)) else {
+        return;
+    };
+    let ms = (now - last).as_secs_f32() * 1000.0;
+    SPANS.with(|s| {
+        s.borrow_mut().push(Span {
+            name,
+            ms,
+            cpu_ms: ms,
+        })
+    });
+}
 /// The CPU time this thread has used, where the platform tells it: a tick
 /// with more wall time than CPU time waited (for a lock, or for a core on a
 /// busy machine).
@@ -78,14 +103,17 @@ pub fn take() -> Vec<Span> {
 /// `name wall` for spans of at least 0.5 ms, with `/cpu` when the thread
 /// worked for less than nine tenths of it: the slow-frame and slow-tick lines.
 pub fn describe(spans: &[Span]) -> String {
+    static FINE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let fine = *FINE.get_or_init(|| std::env::var_os("HORIZON_SPANS_FINE").is_some());
+    let (floor, digits) = if fine { (0.01, 3) } else { (0.15, 1) };
     let list: Vec<String> = spans
         .iter()
-        .filter(|s| s.ms >= 0.5)
+        .filter(|s| s.ms >= floor)
         .map(|s| {
             if s.cpu_ms < s.ms * 0.9 {
-                format!("{} {:.1}/{:.1}", s.name, s.ms, s.cpu_ms)
+                format!("{} {:.digits$}/{:.digits$}", s.name, s.ms, s.cpu_ms)
             } else {
-                format!("{} {:.1}", s.name, s.ms)
+                format!("{} {:.digits$}", s.name, s.ms)
             }
         })
         .collect();
@@ -119,8 +147,8 @@ mod tests {
                 },
                 Span {
                     name: "hud",
-                    ms: 0.3,
-                    cpu_ms: 0.3,
+                    ms: 0.1,
+                    cpu_ms: 0.1,
                 },
             ]);
         });

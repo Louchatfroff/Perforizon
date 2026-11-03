@@ -6,6 +6,24 @@
 #[cfg(target_os = "linux")]
 pub mod wayland;
 
+pub fn experimental_features() -> wgpu::ExperimentalFeatures {
+    unsafe { wgpu::ExperimentalFeatures::enabled() }
+}
+
+/// A pipeline cache over `data`, which must be what `PipelineCache::get_data` gave (an invalid
+/// blob makes an empty cache). The device needs `Features::PIPELINE_CACHE`.
+pub fn create_pipeline_cache(device: &wgpu::Device, data: Option<&[u8]>) -> wgpu::PipelineCache {
+    // Safety: `data` is a file this game wrote from `get_data`, and `fallback` has wgpu
+    // replace data the driver rejects with an empty cache.
+    unsafe {
+        device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+            label: Some("Horizon pipeline cache"),
+            data,
+            fallback: true,
+        })
+    }
+}
+
 /// Opens a Vulkan device with `VK_EXT_hdr_metadata` too, when the GPU offers
 /// it, so [`set_metadata`] can tell the compositor the real peak brightness.
 /// `None` leaves opening to wgpu.

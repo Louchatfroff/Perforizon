@@ -150,19 +150,15 @@ struct TerrainOut {
     @location(0) uv: vec2<f32>,
     @location(1) @interpolate(flat) layer: u32,
     @location(2) color: vec4<f32>,
-    @location(3) spherical: f32,
-    @location(4) cylindrical: f32,
+    @location(3) rel: vec3<f32>,
     // How the face shines in HDR output (mesher.rs's `EMISSION_BITS`): 0 not
     // at all, 1 to 4 the tier with its bright parts, 5 to 8 the tier all over.
-    @location(5) @interpolate(flat) emission: u32,
     @location(6) @interpolate(flat) fade: u32,
-    // A distant tile's tile-relative position, for its fade (`faded`).
-    @location(7) local: vec3<f32>,
-    // terrain.vsh's chunkVisibility: the section's fade-in, from 16 blocks out.
-    @location(8) visibility: f32,
-    // The camera-relative height, for the water mirror's cut at the plane.
-    @location(9) height: f32,
-    @location(10) @interpolate(flat) emissive_layer: u32,
+    // The instance's camera-relative origin: `rel - origin` is the tile-relative position `faded` reads.
+    @location(7) @interpolate(flat) origin: vec3<f32>,
+    // The section's fade-in (instance_visibility); terrain.vsh's chunkVisibility ramps it in
+    // from 16 blocks out, per pixel (`chunk_visibility`) so merged quads fade like unit ones.
+    @location(8) @interpolate(flat) vis: f32,
 }
 // Whether a fading tile or section leaves this pixel out (gfx/lod.rs's
 // `fade_code`, `fade_out_code`). It fades in, or out, chunk by chunk: each
@@ -252,7 +248,10 @@ fn sample_lightmap(sky: f32, block: f32) -> vec4<f32> {
 // integer below 2^24, so it decodes exactly), 1/32 per block for distant
 // terrain tiles (TerrainVertex::tiled). A fading tile negates it past its
 // dither code (gfx/lod.rs's `instance`): the step is the fraction either way.
-fn terrain_uv(packed: vec2<u32>, w: f32) -> vec2<f32> {
+fn terrain_uv(packed: vec2<u32>, w: f32, mode: u32) -> vec2<f32> {
+    if (mode & 0x8000u) != 0u {
+        return vec2<f32>(packed) * (1.0 / 32.0);
+    }
     return vec2<f32>(packed) * instance_step(w);
 }
 // A whole section's step (a power of two) carries its fade-in in the mantissa's 23 bits, as
@@ -274,12 +273,21 @@ fn instance_visibility(w: f32) -> f32 {
 fn fade_code(w: f32) -> u32 {
     return u32(floor(max(-w, 0.0)));
 }
+fn terrain_position(raw: vec4<u32>, mode_bits: u32) -> vec3<f32> {
+    let p = vec3<f32>(raw.xyz);
+    let mode = mode_bits & 0x7fffu;
+    if mode == 0u {
+        return p * (1.0 / 1024.0) - 16.0;
+    }
+    let s = bitcast<f32>((mode + 116u) << 23u);
+    return vec3((p.x - 16384.0) * s, p.y * (1.0 / 32.0) - 1024.0, (p.z - 16384.0) * s);
+}
 @vertex fn vs_terrain(
-    @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
-    @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>,
+    @location(0) position: vec4<u32>, @location(1) uv: vec2<u32>,
+    @location(2) mode: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>,
     @location(5) origin: vec4<f32>) -> TerrainOut {
-    return terrain_vertex(position, terrain_uv(uv, origin.w), layer, color, light, origin.xyz,
-        origin.w);
+    return terrain_vertex(terrain_position(position, mode), terrain_uv(uv, origin.w, mode), position.w,
+        color, light, origin.xyz, origin.w);
 }
 // Flat section draws (gfx/flat.rs): one draw per arena page over the frame's
 // index list. A section's vertices fill whole 256-vertex blocks of its page:
@@ -288,42 +296,38 @@ fn fade_code(w: f32) -> u32 {
 @group(1) @binding(1) var<storage, read> slot_origins: array<vec4<f32>>;
 @vertex fn vs_terrain_flat(
     @builtin(vertex_index) vertex: u32,
-    @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
-    @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>
+    @location(0) position: vec4<u32>, @location(1) uv: vec2<u32>,
+    @location(2) mode: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>
 ) -> TerrainOut {
     let origin = slot_origins[block_slots[vertex >> 8u]];
-    return terrain_vertex(position, terrain_uv(uv, origin.w), layer, color, light, origin.xyz,
-        origin.w);
+    return terrain_vertex(terrain_position(position, mode), terrain_uv(uv, origin.w, mode), position.w,
+        color, light, origin.xyz, origin.w);
 }
 fn terrain_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f32>,
     light: vec2<u32>, origin: vec3<f32>, w: f32) -> TerrainOut {
     let pos = position + origin;
     var out: TerrainOut;
     out.clip = fade_depth(globals.view_proj * vec4(pos, 1.0), w);
-    out.local = position;
+    out.origin = origin;
     out.uv = uv;
-    out.layer = layer;
-    out.emissive_layer = 0xffffffffu;
-    for (var i = 0u; i < min(globals.emissive_count.x, 32u); i++) {
-        if globals.emissive_layers[i].x == (layer & 0x7fffu) {
-            out.emissive_layer = globals.emissive_layers[i].y;
-            break;
-        }
-    }
     let block = max(f32(light.y), dynamic_block_light(pos));
     out.color = vec4(color.rgb, 1.0) * sample_lightmap(f32(light.x) / 16.0, block / 16.0);
     if globals.colored_count.x > 0u {
         out.color = vec4(min(out.color.rgb + color.rgb * native_colored_light(pos), vec3(1.0)), out.color.a);
     }
-    out.emission = 15u - (u32(round(color.a * 255.0)) & 15u);
-    out.height = pos.y;
-    out.spherical = length(pos);
-    out.cylindrical = max(length(pos.xz), abs(pos.y));
+    out.layer = (layer & 0xffffu) | ((15u - (u32(round(color.a * 255.0)) & 15u)) << 16u);
+    out.rel = pos;
     out.fade = fade_code(w);
-    const CHUNK_FULLY_VISIBLE_RANGE: f32 = 16.0;
-    out.visibility = mix(1.0, instance_visibility(w),
-        clamp((length(pos) - CHUNK_FULLY_VISIBLE_RANGE) / CHUNK_FULLY_VISIBLE_RANGE, 0.0, 1.0));
+    out.vis = instance_visibility(w);
     return out;
+}
+fn chunk_visibility(in: TerrainOut) -> f32 {
+    const CHUNK_FULLY_VISIBLE_RANGE: f32 = 16.0;
+    return mix(1.0, in.vis,
+        clamp((length(in.rel) - CHUNK_FULLY_VISIBLE_RANGE) / CHUNK_FULLY_VISIBLE_RANGE, 0.0, 1.0));
+}
+fn fog_in(color: vec4<f32>, in: TerrainOut) -> vec4<f32> {
+    return apply_fog(color, length(in.rel), max(length(in.rel.xz), abs(in.rel.y)));
 }
 fn linear_fog(d: f32, start: f32, end: f32) -> f32 {
     if d <= start { return 0.0; }
@@ -347,47 +351,50 @@ fn brightness(c: vec3<f32>) -> f32 {
 // The water mirror (gfx.rs's reflection pass): what lies below the water plane
 // (`fog_ends.w`, camera-relative) would show above it in the mirror, so it is cut away.
 @fragment fn fs_solid_mirror(in: TerrainOut) -> @location(0) vec4<f32> {
-    if in.height < globals.fog_ends.w { discard; }
+    if in.rel.y < globals.fog_ends.w { discard; }
     return solid_color(in);
 }
 fn solid_color(in: TerrainOut) -> vec4<f32> {
-    let dx = dpdx(in.local);
-    let dy = dpdy(in.local);
-    if faded(in.fade, in.local, dx, dy) { discard; }
+    let dx = dpdx(in.rel);
+    let dy = dpdy(in.rel);
+    if faded(in.fade, in.rel - in.origin, dx, dy) { discard; }
     // Bit 15 of the layer marks opaque leaves (forceOpaque): no alpha cutout.
     let texel = sprite(in.uv, in.layer & 0x7fffu);
     var color = texel * in.color;
     // terrain.fsh: the fade-in mixes toward the fog colour.
-    color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, in.visibility);
+    color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, chunk_visibility(in));
     if color.a < 0.5 && (in.layer & 0x8000u) == 0u { discard; }
     // Below 0.75, alpha tells HDR output (hdr.wgsl) a light source's pixel may
     // shine, and at which tier (mesher::hdr_tier): 0.525 at the lowest, 0 at the
     // brightest. Only pixels as bright as their sprite's threshold may: its
     // bright parts, or all of it. Nothing else reads the frame's alpha.
     var emissive = 1.0;
-    if in.emission > 0u {
-        let whole = in.emission > 4u;
-        let tier = select(in.emission, in.emission - 4u, whole);
+    let emission = in.layer >> 16u;
+    if emission > 0u {
+        let whole = emission > 4u;
+        let tier = select(emission, emission - 4u, whole);
         let l = in.layer & 0x7fffu;
         let t = textureLoad(emission_thresholds, vec2(i32(l % SPRITE_SPLIT), i32(l / SPRITE_SPLIT)), 0);
         if brightness(texel.rgb) >= select(t.r, t.g, whole) {
             emissive = 0.7 * f32(4u - min(tier, 4u)) / 4.0;
         }
     }
-    if in.emissive_layer != 0xffffffffu {
-        let mask = sprite(in.uv, in.emissive_layer);
-        return apply_fog(vec4(mix(color.rgb, mask.rgb, mask.a), mix(emissive, 0.1, mask.a)), in.spherical, in.cylindrical);
+    for (var i = 0u; i < min(globals.emissive_count.x, 32u); i++) {
+        if globals.emissive_layers[i].x == (in.layer & 0x7fffu) {
+            let mask = sprite(in.uv, globals.emissive_layers[i].y);
+            return fog_in(vec4(mix(color.rgb, mask.rgb, mask.a), mix(emissive, 0.1, mask.a)), in);
+        }
     }
-    return apply_fog(vec4(color.rgb, emissive), in.spherical, in.cylindrical);
+    return fog_in(vec4(color.rgb, emissive), in);
 }
 // Water, glass and other see-through faces draw whole as they fade in, the
 // layer drawn first in front (gfx.rs's water tiers): dithered, the faded-out
 // pixels showed the layer behind through the one in front, twice the water.
 @fragment fn fs_translucent(in: TerrainOut) -> @location(0) vec4<f32> {
     var color = sprite(in.uv, in.layer & 0x7fffu) * in.color;
-    color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, in.visibility);
+    color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, chunk_visibility(in));
     if color.a < 0.01 { discard; }
-    return apply_fog(color, in.spherical, in.cylindrical);
+    return fog_in(color, in);
 }
 
 // Sky (SkyRenderer): the 10-vertex sky disc fan at y = 16 (radius 512) in

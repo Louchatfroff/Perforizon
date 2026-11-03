@@ -3,7 +3,7 @@
 // The terrain's translucent layer, once per stage.
 fn oit_terrain_color(in: TerrainOut) -> vec4<f32> {
     var color = sprite(in.uv, in.layer & 0x7fffu) * in.color;
-    color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, in.visibility);
+    color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, chunk_visibility(in));
     if color.a < OIT_ALPHA_CUTOUT { discard; }
     return color;
 }
@@ -26,8 +26,8 @@ fn oit_terrain_color(in: TerrainOut) -> vec4<f32> {
     let seen = oit_sample_transmittance(vec2<i32>(in.clip.xy),
         oit_normalize_depth(in.clip.z, in.clip.xy), 1.0 - color.a);
     let weighted = vec4(color.rgb * color.a, color.a) * seen;
-    let f = max(linear_fog(in.spherical, globals.fog.x, globals.fog.y),
-                linear_fog(in.cylindrical, globals.fog.z, globals.fog.w));
+    let f = max(linear_fog(length(in.rel), globals.fog.x, globals.fog.y),
+                linear_fog(max(length(in.rel.xz), abs(in.rel.y)), globals.fog.z, globals.fog.w));
     // The fog colour is premultiplied by the same weight.
     let rgb = mix(weighted.rgb, globals.fog_color.rgb * weighted.a, f * globals.fog_color.a);
     return vec4(rgb, weighted.a);

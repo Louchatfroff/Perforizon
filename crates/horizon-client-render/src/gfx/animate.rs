@@ -17,6 +17,7 @@
 use super::upload::Uploads;
 use crate::mipmap::Settings;
 use crate::sprites::{FrameBlend, SpriteAnimation};
+use std::collections::HashMap;
 use wgpu::util::DeviceExt;
 
 /// Bytes of `animate.wgsl`'s `Job`.
@@ -72,6 +73,9 @@ pub(super) struct SpriteAnimator {
     size: u32,
     /// The layers the last `animate` rewrote, counted over all arrays.
     changed: Vec<u32>,
+    /// BC7 blocks of the whole frames shown so far (a level of a layer at a frame), by frames buffer,
+    /// first chain, edge and level.
+    blocks: HashMap<(usize, u32, u32, u32), Vec<u8>>,
     /// Whether each sprite layer has an animation.
     is_animated: Vec<bool>,
 }
@@ -175,6 +179,7 @@ impl SpriteAnimator {
                 },
                 size,
                 changed: Vec::new(),
+                blocks: HashMap::new(),
                 is_animated,
             };
         };
@@ -255,6 +260,7 @@ impl SpriteAnimator {
             writer: Writer::Gpu { jobs, pipeline },
             size,
             changed: Vec::new(),
+            blocks: HashMap::new(),
             is_animated,
         }
     }
@@ -313,22 +319,32 @@ impl SpriteAnimator {
                         let job: [u32; 5] = std::array::from_fn(|i| u32::from_le_bytes(words[i]));
                         for level in 0..texture.mip_level_count() {
                             let width = self.size >> level;
-                            uploads.texture(
-                                encoder,
-                                wgpu::TexelCopyTextureInfo {
-                                    texture,
-                                    mip_level: level,
-                                    origin: wgpu::Origin3d {
-                                        x: 0,
-                                        y: 0,
-                                        z: job[0],
-                                    },
-                                    aspect: wgpu::TextureAspect::All,
+                            let destination = wgpu::TexelCopyTextureInfo {
+                                texture,
+                                mip_level: level,
+                                origin: wgpu::Origin3d {
+                                    x: 0,
+                                    y: 0,
+                                    z: job[0],
                                 },
-                                width,
-                                width,
-                                &mix_level(frames, job, width),
-                            );
+                                aspect: wgpu::TextureAspect::All,
+                            };
+                            if texture.format() == wgpu::TextureFormat::Bc7RgbaUnorm {
+                                let encode = || {
+                                    let pixels = mix_level(frames, job, width);
+                                    crate::bc7::encode_level(&pixels, width, width)
+                                };
+                                if job[3] == 0 {
+                                    let key = (group.buffer, job[1], job[4], level);
+                                    let blocks = self.blocks.entry(key).or_insert_with(encode);
+                                    uploads.blocks(encoder, destination, width, width, blocks);
+                                } else {
+                                    uploads.blocks(encoder, destination, width, width, &encode());
+                                }
+                            } else {
+                                let pixels = mix_level(frames, job, width);
+                                uploads.texture(encoder, destination, width, width, &pixels);
+                            }
                         }
                     }
                     group.jobs.clear();
@@ -416,7 +432,7 @@ fn pipeline(device: &wgpu::Device) -> Option<(wgpu::ComputePipeline, wgpu::BindG
         module: &module,
         entry_point: Some("animate"),
         compilation_options: Default::default(),
-        cache: None,
+        cache: crate::gfx::pipeline_cache::get(),
     });
     let layout = pipeline.get_bind_group_layout(0);
     let internal = pollster::block_on(internal.pop());

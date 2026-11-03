@@ -72,20 +72,20 @@ fn horizon_material_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color
     return out;
 }
 @vertex fn horizon_material_vs(
-    @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
-    @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>,
+    @location(0) position: vec4<u32>, @location(1) uv: vec2<u32>,
+    @location(2) mode: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>,
     @location(5) origin: vec4<f32>) -> HorizonMaterialOut {
-    return horizon_material_vertex(position, horizon_terrain_terrain_uv(uv, origin.w), layer,
-        color, light, origin.xyz);
+    return horizon_material_vertex(horizon_terrain_terrain_position(position, mode),
+        horizon_terrain_terrain_uv(uv, origin.w, mode), position.w, color, light, origin.xyz);
 }
 @vertex fn horizon_material_vs_flat(
     @builtin(vertex_index) vertex: u32,
-    @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
-    @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>
+    @location(0) position: vec4<u32>, @location(1) uv: vec2<u32>,
+    @location(2) mode: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>
 ) -> HorizonMaterialOut {
     let origin = horizon_terrain_slot_origins[horizon_terrain_block_slots[vertex >> 8u]];
-    return horizon_material_vertex(position, horizon_terrain_terrain_uv(uv, origin.w), layer,
-        color, light, origin.xyz);
+    return horizon_material_vertex(horizon_terrain_terrain_position(position, mode),
+        horizon_terrain_terrain_uv(uv, origin.w, mode), position.w, color, light, origin.xyz);
 }
 // The prelude's `block_normal_map` and `block_specular_map`: the resource packs' LabPBR maps
 // in the pack's frame group (3), one array each, a blank 1x1 without them.
@@ -306,7 +306,7 @@ impl NativeMaterial {
                     })],
                 }),
                 multiview_mask: None,
-                cache: None,
+                cache: crate::gfx::pipeline_cache::get(),
             })
         };
         let blend = Some(wgpu::BlendState::ALPHA_BLENDING);

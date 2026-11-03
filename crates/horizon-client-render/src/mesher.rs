@@ -4,6 +4,8 @@
 //! cardinal shading, tint sources, block offsets; see `lighting`). Fluids
 //! follow `FluidRenderer` (see `fluid`).
 mod fluid;
+mod greedy;
+mod greedy_binary;
 mod lighting;
 mod sides;
 use crate::{
@@ -13,6 +15,7 @@ use crate::{
     chunk::{Chunk, MIN_Y},
     models::catalog::BakedFace,
 };
+pub use greedy::split as split_tiled;
 use horizon_core::{
     biome::BiomeZoom, geometry::Direction, position::BlockPos, random::position_seed,
 };
@@ -45,63 +48,153 @@ pub struct Vertex {
 /// `Vertex::normal` of a baked-colour quad of an `entitySolid` model: the render type culls
 /// back faces, which the entity pipelines here do not, so `entity.wgsl` discards them.
 pub const CULL_BACK: [i8; 4] = [0, 0, 0, 1];
-/// A section vertex: vanilla's `DefaultVertexFormat.BLOCK` (position, colour,
-/// UV0, UV2) with the sprite's array layer beside the light, in 24 bytes
-/// rather than vanilla's 28: the UV is fixed point, which holds model UVs
-/// (multiples of 1/16 and their halves) exactly. The position stays a float:
-/// fixed point would move the edges of offset plants and rotated elements by
-/// a fraction of a pixel. Terrain has no normal: `ModelBlockRenderer` bakes
-/// the face shade into the colour and `terrain.vsh` only multiplies it by the
-/// lightmap.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct TerrainVertex {
-    /// Section-relative position.
-    pub pos: [f32; 3],
-    /// UV within the sprite, `UV_STEPS` per unit (`TerrainVertex::new`,
-    /// `terrain.wgsl`'s `terrain_uv`).
-    pub(crate) uv: [u16; 2],
-    /// Sprite array layer, with `OPAQUE_LAYER` for opaque leaves and quads over opaque texels.
+    pub(crate) pos: [u16; 3],
     pub layer: u16,
-    /// Smooth light, 16x fixed point: sky in the low byte, block in the high one.
+    pub(crate) uv: [u16; 2],
     pub light: u16,
-    /// RGBA8: tint multiplied by directional shade and ambient occlusion.
+    pub(crate) mode: u16,
     pub color: u32,
 }
-/// Fixed-point steps per unit of `TerrainVertex` UVs, which span `[0, 2)`.
 pub const UV_STEPS: f32 = 32768.0;
-/// Fixed-point steps per block of distant-terrain UVs (`TerrainVertex::tiled`),
-/// which span `[0, 2048)`: merged faces repeat their sprite once per block.
 pub const TILED_UV_STEPS: f32 = 32.0;
+pub const POS_STEPS: f32 = 1024.0;
+pub const POS_BIAS: f32 = 16.0;
+pub const TILED_MODE: u16 = 0x8000;
+static GREEDY_MESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+pub fn set_greedy(on: bool) -> bool {
+    GREEDY_MESHING.swap(on, std::sync::atomic::Ordering::Relaxed) != on
+}
+static BINARY_GREEDY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn set_binary_greedy(on: bool) -> bool {
+    BINARY_GREEDY.swap(on, std::sync::atomic::Ordering::Relaxed) != on
+}
+pub fn binary_greedy() -> bool {
+    BINARY_GREEDY.load(std::sync::atomic::Ordering::Relaxed)
+}
+pub fn greedy() -> bool {
+    GREEDY_MESHING.load(std::sync::atomic::Ordering::Relaxed)
+}
+static POSITIONAL_SHADING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+pub fn set_positional_shading(on: bool) -> bool {
+    POSITIONAL_SHADING.swap(on, std::sync::atomic::Ordering::Relaxed) != on
+}
+pub const LOD_Y_STEPS: f32 = 32.0;
+pub const LOD_Y_BIAS: f32 = 1024.0;
+pub const LOD_XZ_BIAS: f32 = 16384.0;
+const LOD_XZ_EXPONENT: i32 = 10;
+fn exp2_int(e: i32) -> f32 {
+    f32::from_bits(((e + 127) as u32) << 23)
+}
+fn quantize(v: f32, steps: f32, bias: f32) -> u16 {
+    ((v + bias) * steps).round().clamp(0.0, f32::from(u16::MAX)) as u16
+}
 impl TerrainVertex {
     pub fn new(pos: [f32; 3], uv: [f32; 2], layer: u16, color: u32, light: u16) -> Self {
         Self {
-            pos,
+            pos: pos.map(|v| quantize(v, POS_STEPS, POS_BIAS)),
             uv: uv.map(|v| (v * UV_STEPS).round().clamp(0.0, f32::from(u16::MAX)) as u16),
             layer,
             light,
+            mode: 0,
             color,
         }
     }
-    /// A vertex of a merged distant-terrain face, its UV in blocks from the
-    /// face's corner. Drawn with an instance UV scale of `1 / TILED_UV_STEPS`.
-    pub fn tiled(pos: [f32; 3], uv: [f32; 2], layer: u16, color: u32, light: u16) -> Self {
+    pub fn tiled(
+        pos: [f32; 3],
+        uv: [f32; 2],
+        layer: u16,
+        color: u32,
+        light: u16,
+        level: u8,
+    ) -> Self {
+        let xz = exp2_int(LOD_XZ_EXPONENT - i32::from(level));
         Self {
-            pos,
+            pos: [
+                quantize(pos[0] * xz, 1.0, LOD_XZ_BIAS),
+                quantize(pos[1], LOD_Y_STEPS, LOD_Y_BIAS),
+                quantize(pos[2] * xz, 1.0, LOD_XZ_BIAS),
+            ],
             uv: uv.map(|v| (v * TILED_UV_STEPS).round().clamp(0.0, f32::from(u16::MAX)) as u16),
             layer,
             light,
+            mode: u16::from(level) + 1,
             color,
         }
     }
-    /// The UV the GPU samples.
+    pub fn pos(&self) -> [f32; 3] {
+        let [x, y, z] = self.pos.map(f32::from);
+        let mode = self.mode & !TILED_MODE;
+        if mode == 0 {
+            return [x, y, z].map(|v| v / POS_STEPS - POS_BIAS);
+        }
+        let xz = exp2_int(i32::from(mode) - 1 - LOD_XZ_EXPONENT);
+        [
+            (x - LOD_XZ_BIAS) * xz,
+            y / LOD_Y_STEPS - LOD_Y_BIAS,
+            (z - LOD_XZ_BIAS) * xz,
+        ]
+    }
     pub fn uv(&self) -> [f32; 2] {
-        self.uv.map(|v| f32::from(v) / UV_STEPS)
+        let steps = if self.mode & TILED_MODE != 0 {
+            TILED_UV_STEPS
+        } else {
+            UV_STEPS
+        };
+        self.uv.map(|v| f32::from(v) / steps)
     }
 }
 #[cfg(test)]
 mod vertex_tests {
     use super::TerrainVertex;
+    #[test]
+    fn a_vertex_is_twenty_bytes() {
+        assert_eq!(std::mem::size_of::<TerrainVertex>(), 20);
+    }
+    #[test]
+    fn section_positions_round_trip_over_the_whole_range() {
+        for raw in (0..=65535u32).step_by(7).chain([65535]) {
+            let p = raw as f32 / 1024.0 - 16.0;
+            let v = TerrainVertex::new([p, p, p], [0.0; 2], 0, 0, 0);
+            assert_eq!(v.pos(), [p; 3]);
+        }
+        let v = TerrainVertex::new([-16.0, 0.0, 47.999], [0.0; 2], 0, 0, 0);
+        assert_eq!(v.pos()[0], -16.0);
+        assert!((v.pos()[2] - 47.999).abs() <= 0.5 / 1024.0);
+        for exact in [0.0, 1.0 / 16.0, 0.5, 15.9375, 16.0, -8.0, 31.5, 40.0] {
+            assert_eq!(
+                TerrainVertex::new([exact; 3], [0.0; 2], 0, 0, 0).pos(),
+                [exact; 3]
+            );
+        }
+    }
+    #[test]
+    fn out_of_range_positions_clamp() {
+        let v = TerrainVertex::new([-100.0, 100.0, 0.0], [0.0; 2], 0, 0, 0);
+        assert_eq!(v.pos(), [-16.0, 48.0 - 1.0 / 1024.0, 0.0]);
+    }
+    #[test]
+    fn tile_positions_are_exact_on_their_grid() {
+        for level in 0..=22u8 {
+            let size = (16u64 << level) as f32;
+            let unit = 2f32.powi(i32::from(level) - 10);
+            for fraction in [0.0, 1.0 / 1024.0, 0.25, 0.5, 1.0] {
+                let x = (fraction * size).max(0.0);
+                let x = (x / unit).round() * unit;
+                let y = 71.0 + fraction;
+                let v = TerrainVertex::tiled([x, y, size - x], [0.0; 2], 3, 0, 0, level);
+                let [px, py, pz] = v.pos();
+                assert_eq!(px, x, "level {level}");
+                assert_eq!(pz, size - x, "level {level}");
+                assert!((py - y).abs() <= 1.0 / 64.0, "level {level}");
+            }
+            let low = TerrainVertex::tiled([-size, -64.0, -size], [0.0; 2], 0, 0, 0, level);
+            assert_eq!(low.pos(), [-size, -64.0, -size]);
+        }
+    }
     #[test]
     fn model_uvs_pack_exactly() {
         for i in 0..=32 {
@@ -242,6 +335,7 @@ pub struct SectionMesh {
     /// A far mesh was clipped around finer tiles or resident chunks. Keep
     /// the previous GPU mesh while its replacements fade in.
     pub keep: bool,
+    pub leaves: bool,
 }
 impl Default for SectionMesh {
     fn default() -> Self {
@@ -255,6 +349,7 @@ impl Default for SectionMesh {
             sprite_layers: Vec::new(),
             bounds: None,
             keep: false,
+            leaves: false,
         }
     }
 }
@@ -282,16 +377,19 @@ impl SectionMesh {
         self.solid.clear();
         self.translucent.clear();
         self.block_entities.clear();
+        self.lights.clear();
         self.sprite_layers.clear();
         self.sides = Sides::default();
         self.visibility = ALL_VISIBLE;
         self.bounds = None;
         self.keep = false;
+        self.leaves = false;
     }
     pub(crate) fn capacity_bytes(&self) -> usize {
         self.solid.capacity() * std::mem::size_of::<TerrainVertex>()
             + self.translucent.capacity() * std::mem::size_of::<TerrainVertex>()
             + self.block_entities.capacity() * std::mem::size_of::<([i32; 3], u32)>()
+            + self.lights.capacity() * std::mem::size_of::<([i32; 3], u32)>()
             + self.sprite_layers.capacity() * std::mem::size_of::<u16>()
     }
     /// Sorts the solid quads by the side they face, for the renderer to
@@ -309,12 +407,12 @@ impl SectionMesh {
         let mut min = glam::Vec3::splat(f32::INFINITY);
         let mut max = glam::Vec3::splat(f32::NEG_INFINITY);
         for v in &self.solid {
-            let p = glam::Vec3::from(v.pos);
+            let p = glam::Vec3::from(v.pos());
             min = min.min(p);
             max = max.max(p);
         }
         for v in &self.translucent {
-            let p = glam::Vec3::from(v.pos);
+            let p = glam::Vec3::from(v.pos());
             min = min.min(p);
             max = max.max(p);
         }
@@ -828,29 +926,34 @@ impl Padded {
         for y in -B..16 + B {
             let wy = base_y + y;
             for z in -B..16 + B {
-                for x in -B..16 + B {
-                    let chunk = region[((z + 16) >> 4) as usize][((x + 16) >> 4) as usize];
-                    let i = pi(x, y, z);
-                    if let Some(c) = chunk {
-                        blocks[i] =
-                            if (0..16).contains(&x) && (0..16).contains(&y) && (0..16).contains(&z)
-                            {
-                                own[(y << 8 | z << 4 | x) as usize]
-                            } else {
-                                c.get(x & 15, wy, z & 15)
-                            };
-                        light[i] = c.light(x & 15, wy, z & 15);
-                    } else if let Some(c) = region[1][1] {
-                        // A neighbour not loaded continues this chunk's edge
-                        // column. As lit air, the outermost chunks' water drew
-                        // a wall toward it (fluids show both sides), a light
-                        // sheet in the water where far terrain carries on.
-                        // Vanilla draws no chunk without its neighbours.
-                        let (ex, ez) = (x.clamp(0, 15), z.clamp(0, 15));
-                        blocks[i] = c.get(ex, wy, ez);
-                        light[i] = c.light(ex, wy, ez);
-                    } else {
-                        light[i] = 0xF0;
+                let row = region[((z + 16) >> 4) as usize];
+                let inside = (0..16).contains(&y) && (0..16).contains(&z);
+                for (column, xs) in [(0, -B..0), (1, 0..16), (2, 16..16 + B)] {
+                    if let (Some(c), true) = (row[column], inside && column == 1) {
+                        let (at, from) = (pi(0, y, z), (y << 8 | z << 4) as usize);
+                        blocks[at..at + 16].copy_from_slice(&own[from..from + 16]);
+                        for x in 0..16 {
+                            light[at + x as usize] = c.light(x, wy, z & 15);
+                        }
+                        continue;
+                    }
+                    for x in xs {
+                        let i = pi(x, y, z);
+                        if let Some(c) = row[column] {
+                            blocks[i] = c.get(x & 15, wy, z & 15);
+                            light[i] = c.light(x & 15, wy, z & 15);
+                        } else if let Some(c) = region[1][1] {
+                            // A neighbour not loaded continues this chunk's edge
+                            // column. As lit air, the outermost chunks' water drew
+                            // a wall toward it (fluids show both sides), a light
+                            // sheet in the water where far terrain carries on.
+                            // Vanilla draws no chunk without its neighbours.
+                            let (ex, ez) = (x.clamp(0, 15), z.clamp(0, 15));
+                            blocks[i] = c.get(ex, wy, ez);
+                            light[i] = c.light(ex, wy, ez);
+                        } else {
+                            light[i] = 0xF0;
+                        }
                     }
                 }
             }
@@ -1092,8 +1195,21 @@ impl Mesher<'_> {
         &mut self,
         region: &[[Option<&Chunk>; 3]; 3],
         sy: i32,
+        out: SectionMesh,
+        scratch: &mut MeshScratch,
+    ) -> SectionMesh {
+        let greedy = greedy()
+            && !self.shader_pack_lighting
+            && !POSITIONAL_SHADING.load(std::sync::atomic::Ordering::Relaxed);
+        self.mesh_section(region, sy, out, scratch, greedy)
+    }
+    pub(crate) fn mesh_section(
+        &mut self,
+        region: &[[Option<&Chunk>; 3]; 3],
+        sy: i32,
         mut out: SectionMesh,
         scratch: &mut MeshScratch,
+        greedy: bool,
     ) -> SectionMesh {
         out.clear();
         let center = region[1][1].expect("centre chunk");
@@ -1127,6 +1243,12 @@ impl Mesher<'_> {
                     if state.block_entity {
                         out.block_entities
                             .push(([center.x * 16 + x, base_y + y, center.z * 16 + z], id));
+                    }
+                    if state.leaves {
+                        out.leaves = true;
+                    }
+                    if state.leaves {
+                        out.leaves = true;
                     }
                     if state.emission > 0 {
                         out.lights
@@ -1205,6 +1327,15 @@ impl Mesher<'_> {
                         }
                     }
                 }
+            }
+        }
+        if greedy {
+            if binary_greedy() {
+                greedy_binary::merge(&mut out.solid);
+                greedy_binary::merge(&mut out.translucent);
+            } else {
+                greedy::merge(&mut out.solid);
+                greedy::merge(&mut out.translucent);
             }
         }
         out.finish_sprite_layers();

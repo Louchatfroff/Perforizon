@@ -7,6 +7,11 @@ use std::collections::BTreeMap;
 pub const GRAIN: u64 = 256;
 /// The largest page, in bytes.
 pub const PAGE_BYTES: u64 = 256 << 20;
+/// The largest page of a pooled arena, in bytes (`Arena::set_pool`).
+pub const POOL_PAGE_BYTES: u64 = (2 << 30) - 1;
+/// Vertices a consolidation adds beyond what is in use, so the uploads that
+/// follow it do not grow the page again at once.
+const POOL_SLACK: u64 = 4 << 20;
 
 /// Free vertex ranges: start -> length, never adjacent.
 #[derive(Debug, PartialEq)]
@@ -88,6 +93,14 @@ impl Page {
     }
 }
 
+/// What the arena's buffer creations and growths cost.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ArenaStats {
+    pub creates: u32,
+    pub grows: u32,
+    pub slowest_ms: f64,
+}
+
 /// An arena with this many bytes in free ranges, at least half of its pages,
 /// has a page worth emptying (`Arena::sparsest`).
 const COMPACT_MIN_FREE: u64 = 128 << 20;
@@ -104,6 +117,13 @@ pub struct Arena {
     closing: Option<u32>,
     /// A page had to go to system memory (logged once).
     spilled: bool,
+    /// One large page for the terrain (`set_pool`).
+    pool: bool,
+    base_limit: u64,
+    pool_limit: u64,
+    /// The vertices a pooled page or growth reaches at least: what the arena held before the last `clear`.
+    hint: u64,
+    stats: ArenaStats,
     /// Tests: GPU-local pages fail as if video memory were full.
     #[cfg(test)]
     video_memory_full: bool,
@@ -136,8 +156,14 @@ impl Arena {
         usage: wgpu::BufferUsages,
     ) -> Self {
         // 256 MiB pages, or less where the device's buffers are smaller.
-        let bytes = device.limits().max_buffer_size.min(PAGE_BYTES);
-        let page_limit = (bytes / stride) / GRAIN * GRAIN;
+        let limits = device.limits();
+        let vertices = |bytes: u64| (bytes / stride) / GRAIN * GRAIN;
+        let page_limit = vertices(limits.max_buffer_size.min(PAGE_BYTES));
+        let mut pool_bytes = limits.max_buffer_size.min(POOL_PAGE_BYTES);
+        if usage.contains(wgpu::BufferUsages::STORAGE) {
+            pool_bytes = pool_bytes.min(limits.max_storage_buffer_binding_size);
+        }
+        let pool_limit = vertices(pool_bytes).max(page_limit);
         let capacity = capacity.next_multiple_of(GRAIN).min(page_limit);
         Self {
             pages: Vec::new(),
@@ -147,8 +173,63 @@ impl Arena {
             usage,
             closing: None,
             spilled: false,
+            pool: false,
+            base_limit: page_limit,
+            pool_limit,
+            hint: 0,
+            stats: ArenaStats::default(),
             #[cfg(test)]
             video_memory_full: false,
+        }
+    }
+    pub fn stats(&self) -> ArenaStats {
+        self.stats
+    }
+    pub fn page_count(&self) -> usize {
+        self.pages.iter().flatten().count()
+    }
+    /// Pooled: the terrain lives in as few and as large pages as the device
+    /// allows (up to `page_vertices`), new ranges go to the largest
+    /// page, and the other pages are emptied into it. Pages that exist stay
+    /// as they are until then. True when anything changed.
+    pub fn set_pool(&mut self, on: bool) -> bool {
+        let limit = if on { self.pool_limit } else { self.base_limit };
+        let changed = on != self.pool || limit != self.page_limit;
+        self.pool = on;
+        self.page_limit = limit;
+        if !on {
+            self.hint = 0;
+        }
+        changed
+    }
+    /// Vertices in use (not in free ranges) in every page.
+    pub fn used_vertices(&self) -> u64 {
+        self.pages
+            .iter()
+            .flatten()
+            .map(|p| p.capacity - p.free_vertices())
+            .sum()
+    }
+    pub fn pooled(&self) -> bool {
+        self.pool
+    }
+    /// Pooled with several pages: grows the newest page, in `encoder`, to hold
+    /// what is in use plus room, so that `sparsest` finds room for the other
+    /// pages' meshes.
+    pub fn consolidate(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
+        if !self.pool || self.page_count() < 2 || self.closing.is_some() {
+            return;
+        }
+        let used = self.used_vertices();
+        let target = (used + used / 4 + POOL_SLACK)
+            .next_multiple_of(GRAIN)
+            .min(self.page_limit);
+        let last = self.growing_page();
+        if let Some(page) = self.pages.get(last).and_then(Option::as_ref)
+            && !page.host
+            && page.capacity < target
+        {
+            self.grow(device, encoder, last, target, true);
         }
     }
     /// A buffer of `capacity` vertices in video memory or, when that is full
@@ -156,6 +237,24 @@ impl Arena {
     /// allocation rather than page like OpenGL ones, and wgpu's default error
     /// handler panics. `None` when neither has room.
     fn create(&mut self, device: &wgpu::Device, capacity: u64) -> Option<(wgpu::Buffer, bool)> {
+        let started = std::time::Instant::now();
+        let made = self.create_buffer(device, capacity);
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        self.stats.creates += 1;
+        self.stats.slowest_ms = self.stats.slowest_ms.max(ms);
+        if ms > 5.0 {
+            log::info!(
+                "Horizon arena: a {} MiB buffer took {ms:.1} ms",
+                (capacity * self.stride) >> 20
+            );
+        }
+        made
+    }
+    fn create_buffer(
+        &mut self,
+        device: &wgpu::Device,
+        capacity: u64,
+    ) -> Option<(wgpu::Buffer, bool)> {
         let usage = self.usage | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
         #[cfg(test)]
         let local = (!self.video_memory_full)
@@ -197,7 +296,7 @@ impl Arena {
     }
     /// The most vertices a page holds.
     pub fn page_vertices(&self) -> u64 {
-        self.page_limit
+        self.pool_limit
     }
     pub fn has_page(&self, page: u32) -> bool {
         self.pages.get(page as usize).is_some_and(Option::is_some)
@@ -228,22 +327,25 @@ impl Arena {
         if let Some(found) = self.alloc_existing(len) {
             return Some(found);
         }
-        let last = self.pages.len().saturating_sub(1);
-        if let Some(page) = self.pages.last().and_then(Option::as_ref)
+        let last = self.growing_page();
+        if let Some(page) = self.pages.get(last).and_then(Option::as_ref)
             && page.capacity < self.page_limit
             && self.closing != Some(last as u32)
         {
             let current = page.capacity;
-            let grown = (current * 2).max(current + len).min(self.page_limit);
+            let grown = (current * 2)
+                .max(current + len)
+                .max(self.hint)
+                .min(self.page_limit);
             if (grown - current >= len || grown == self.page_limit)
-                && self.grow(device, encoder, last, grown)
+                && self.grow(device, encoder, last, grown, false)
                 && let Some(start) = self.pages[last].as_mut().unwrap().free.take(len)
             {
                 return Some((last as u32, start));
             }
         }
         let capacity = if self.pages.is_empty() {
-            self.initial_capacity
+            self.initial_capacity.max(self.hint)
         } else {
             1 << 20
         }
@@ -278,23 +380,57 @@ impl Arena {
     /// emptied: never grows the arena.
     pub fn alloc_existing(&mut self, vertices: u64) -> Option<(u32, u64)> {
         let len = Self::span(vertices).min(self.page_limit);
-        let closing = self.closing;
+        self.take_in(len, false)
+    }
+    /// The page that grows: the newest, or when pooled the largest open one.
+    fn growing_page(&self) -> usize {
+        if self.pool {
+            self.largest_open(false)
+                .unwrap_or(self.pages.len().saturating_sub(1))
+        } else {
+            self.pages.len().saturating_sub(1)
+        }
+    }
+    fn largest_open(&self, local_only: bool) -> Option<usize> {
         self.pages
-            .iter_mut()
+            .iter()
             .enumerate()
-            .filter(|(i, _)| closing != Some(*i as u32))
-            .find_map(|(i, page)| Some((i as u32, page.as_mut()?.free.take(len)?)))
+            .filter(|(i, p)| {
+                self.closing != Some(*i as u32)
+                    && p.as_ref().is_some_and(|p| !(local_only && p.host))
+            })
+            .max_by_key(|(_, p)| p.as_ref().map_or(0, |p| p.capacity))
+            .map(|(i, _)| i)
+    }
+    /// First fit over the open pages, the largest first when pooled.
+    fn take_in(&mut self, len: u64, local_only: bool) -> Option<(u32, u64)> {
+        let preferred = if self.pool {
+            self.largest_open(local_only)
+        } else {
+            None
+        };
+        let closing = self.closing;
+        for i in preferred.into_iter().chain(0..self.pages.len()) {
+            if closing == Some(i as u32) {
+                continue;
+            }
+            let Some(page) = self.pages[i].as_mut() else {
+                continue;
+            };
+            if local_only && page.host {
+                continue;
+            }
+            if let Some(start) = page.free.take(len) {
+                return Some((i as u32, start));
+            }
+        }
+        None
     }
     /// `alloc_existing` for a mesh moved off the closing page: only pages in
     /// video memory, so compaction never pushes terrain into system memory.
     pub fn alloc_moved(&mut self, vertices: u64) -> Option<(u32, u64)> {
         let len = Self::span(vertices).min(self.page_limit);
-        let closing = self.closing;
-        self.pages
-            .iter_mut()
-            .enumerate()
-            .filter(|(i, p)| closing != Some(*i as u32) && p.as_ref().is_some_and(|p| !p.host))
-            .find_map(|(i, page)| Some((i as u32, page.as_mut()?.free.take(len)?)))
+        self.take_in(len, true)
     }
     /// The page to empty when much of the arena is free ranges (video memory
     /// that fragmentation keeps: a page goes back only once all of it is free):
@@ -317,7 +453,8 @@ impl Arena {
         };
         let free: u64 = pages().map(|(_, p)| p.free_vertices()).sum();
         let capacity: u64 = pages().map(|(_, p)| p.capacity).sum();
-        if free * self.stride < min_free || free * 2 < capacity {
+        let largest = self.pool.then(|| self.largest_open(false)).flatten();
+        if !self.pool && (free * self.stride < min_free || free * 2 < capacity) {
             return None;
         }
         // Moves only go to video-memory pages (`alloc_moved`).
@@ -327,6 +464,9 @@ impl Arena {
             .sum();
         pages()
             .filter_map(|(i, p)| {
+                if largest == Some(i) {
+                    return None;
+                }
                 let used = p.capacity - p.free_vertices();
                 let own = if p.host { 0 } else { p.free_vertices() };
                 // The room elsewhere, less a quarter for first fit's gaps.
@@ -400,11 +540,15 @@ impl Arena {
         encoder: &mut wgpu::CommandEncoder,
         page: usize,
         capacity: u64,
+        local_only: bool,
     ) -> bool {
         let capacity = capacity.next_multiple_of(GRAIN).min(self.page_limit);
         let Some((buffer, host)) = self.create(device, capacity) else {
             return false;
         };
+        if local_only && host {
+            return false;
+        }
         let old = self.pages[page].as_mut().expect("live arena page");
         // Copies recorded for the old buffer run before this one.
         encoder.copy_buffer_to_buffer(&old.buffer, 0, &buffer, 0, old.capacity * self.stride);
@@ -413,6 +557,7 @@ impl Arena {
         old.host = host;
         old.capacity = capacity;
         old.free.give(previous, capacity - previous);
+        self.stats.grows += 1;
         true
     }
     /// Reclaim after an upload batch, so replacing a section can reuse its range.
@@ -434,6 +579,12 @@ impl Arena {
         }
     }
     pub fn clear(&mut self) {
+        if self.pool {
+            self.hint = self
+                .hint
+                .max(self.used_vertices() + self.used_vertices() / 8)
+                .min(self.page_limit);
+        }
         self.pages.clear();
         self.closing = None;
     }
@@ -647,6 +798,41 @@ mod tests {
             assert_eq!(alloc(&mut arena, &device, &queue, GRAIN), Some((0, 0)));
             assert_eq!(arena.bytes(), arena.stride * GRAIN);
         }
+    }
+
+    #[test]
+    fn pooled_ranges_prefer_the_largest_page_and_pages_empty_into_it() {
+        let Some((device, queue)) = device() else {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        };
+        let mut arena = Arena::new(&device, 4, GRAIN, false);
+        arena.page_limit = 4 * GRAIN;
+        arena.base_limit = 4 * GRAIN;
+        arena.pool_limit = 16 * GRAIN;
+        for _ in 0..6 {
+            alloc(&mut arena, &device, &queue, GRAIN).unwrap();
+        }
+        assert_eq!(arena.page_count(), 2);
+        assert!(arena.set_pool(true));
+        assert!(!arena.set_pool(true));
+        assert_eq!(arena.page_limit, 16 * GRAIN);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        arena.consolidate(&device, &mut encoder);
+        queue.submit([encoder.finish()]);
+        let largest = arena.largest_open(false).unwrap();
+        assert_eq!(
+            arena.pages[largest].as_ref().unwrap().capacity,
+            (6 * GRAIN + 6 * GRAIN / 4 + POOL_SLACK)
+                .next_multiple_of(GRAIN)
+                .min(16 * GRAIN)
+        );
+        let (page, _) = arena.alloc_existing(GRAIN).unwrap();
+        assert_eq!(page as usize, largest);
+        let small = arena.sparsest().or_else(|| arena.sparsest_from(0));
+        assert!(small.is_some_and(|p| p as usize != largest));
+        assert!(!arena.set_pool(false) || arena.page_limit == 4 * GRAIN);
+        assert_eq!(arena.page_limit, 4 * GRAIN);
     }
 
     #[test]

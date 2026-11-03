@@ -678,10 +678,11 @@ fn mesh_columns_with_edges(
         }
     }
     let mut mesh = SectionMesh::default();
+    let level = key.level;
     for (key, mut rects) in faces {
         merge(&mut rects);
         for rect in rects {
-            emit(&mut mesh, key, rect)
+            emit(&mut mesh, key, rect, level)
         }
     }
     mesh.finish_sprite_layers();
@@ -744,24 +745,32 @@ mod refinement_tests {
         let [fx, _, fz] = fine.origin();
         let mut area = 0.0;
         for quad in mesh.solid.as_chunks::<4>().0 {
-            if !quad.iter().all(|v| v.pos[1] == 8.0) {
+            if !quad.iter().all(|v| v.pos()[1] == 8.0) {
                 continue;
             }
-            let a = glam::Vec3::from(quad[0].pos);
-            let b = glam::Vec3::from(quad[1].pos);
-            let c = glam::Vec3::from(quad[2].pos);
+            let a = glam::Vec3::from(quad[0].pos());
+            let b = glam::Vec3::from(quad[1].pos());
+            let c = glam::Vec3::from(quad[2].pos());
             let normal = (b - a).cross(c - a);
             area += normal.y;
-            let min_x = quad.iter().map(|v| v.pos[0]).fold(f32::INFINITY, f32::min) + ox as f32;
+            let min_x = quad
+                .iter()
+                .map(|v| v.pos()[0])
+                .fold(f32::INFINITY, f32::min)
+                + ox as f32;
             let max_x = quad
                 .iter()
-                .map(|v| v.pos[0])
+                .map(|v| v.pos()[0])
                 .fold(f32::NEG_INFINITY, f32::max)
                 + ox as f32;
-            let min_z = quad.iter().map(|v| v.pos[2]).fold(f32::INFINITY, f32::min) + oz as f32;
+            let min_z = quad
+                .iter()
+                .map(|v| v.pos()[2])
+                .fold(f32::INFINITY, f32::min)
+                + oz as f32;
             let max_z = quad
                 .iter()
-                .map(|v| v.pos[2])
+                .map(|v| v.pos()[2])
                 .fold(f32::NEG_INFINITY, f32::max)
                 + oz as f32;
             assert!(
@@ -1052,11 +1061,11 @@ const MAX_FACE: f32 = 1024.0;
 const MAX_PIECES: f32 = 4.0;
 /// Steps along a cell of a tile cut around finer terrain, at most.
 const MAX_STEPS: i32 = 32;
-fn emit(mesh: &mut SectionMesh, key: FaceKey, rect: Rect) {
+fn emit(mesh: &mut SectionMesh, key: FaceKey, rect: Rect, level: u8) {
     let pieces = ((rect.u1 - rect.u0) / MAX_FACE).ceil() * ((rect.v1 - rect.v0) / MAX_FACE).ceil();
     if pieces > MAX_PIECES {
         let extent = (rect.u1 - rect.u0).max(rect.v1 - rect.v0);
-        emit_quad(mesh, key, rect, (MAX_FACE / extent).min(1.0));
+        emit_quad(mesh, key, rect, (MAX_FACE / extent).min(1.0), level);
         return;
     }
     let mut u0 = rect.u0;
@@ -1065,7 +1074,7 @@ fn emit(mesh: &mut SectionMesh, key: FaceKey, rect: Rect) {
         let mut v0 = rect.v0;
         while v0 < rect.v1 {
             let v1 = rect.v1.min(v0 + MAX_FACE);
-            emit_quad(mesh, key, Rect { u0, v0, u1, v1 }, 1.0);
+            emit_quad(mesh, key, Rect { u0, v0, u1, v1 }, 1.0, level);
             v0 = v1;
         }
         u0 = u1;
@@ -1073,7 +1082,7 @@ fn emit(mesh: &mut SectionMesh, key: FaceKey, rect: Rect) {
 }
 /// `uv_scale` shrinks the UVs, in blocks from the face's corner, of a face
 /// too wide for them.
-fn emit_quad(mesh: &mut SectionMesh, key: FaceKey, rect: Rect, uv_scale: f32) {
+fn emit_quad(mesh: &mut SectionMesh, key: FaceKey, rect: Rect, uv_scale: f32, level: u8) {
     mesh.note_sprite_layer(key.layer);
     let Rect { u0, v0, u1, v1 } = rect;
     let p = f32::from_bits(key.plane);
@@ -1118,6 +1127,7 @@ fn emit_quad(mesh: &mut SectionMesh, key: FaceKey, rect: Rect, uv_scale: f32) {
             key.layer,
             key.color,
             key.light,
+            level,
         )
     }));
 }
@@ -1195,19 +1205,20 @@ mod tests {
                 u1: 2500.0,
                 v1: 16.0,
             },
+            8,
         );
         // 2500 blocks: 1024 + 1024 + 452.
         assert_eq!(mesh.solid.len(), 3 * 4);
         let mut area = 0.0;
         for q in mesh.solid.as_chunks::<4>().0 {
             let x =
-                |f: fn(f32, f32) -> f32, i: usize| q.iter().map(|v| v.pos[i]).reduce(f).unwrap();
+                |f: fn(f32, f32) -> f32, i: usize| q.iter().map(|v| v.pos()[i]).reduce(f).unwrap();
             area += (x(f32::max, 0) - x(f32::min, 0)) * (x(f32::max, 2) - x(f32::min, 2));
             for v in q {
                 // UVs follow the world position modulo a block.
                 let uv = tiled_uv(v);
-                assert_eq!((uv[0] - v.pos[0]).rem_euclid(1.0), 0.0);
-                assert_eq!((uv[1] + v.pos[2]).rem_euclid(1.0), 0.0);
+                assert_eq!((uv[0] - v.pos()[0]).rem_euclid(1.0), 0.0);
+                assert_eq!((uv[1] + v.pos()[2]).rem_euclid(1.0), 0.0);
                 assert!(uv[0] <= MAX_FACE + 1.0 && uv[1] <= MAX_FACE + 1.0);
             }
         }
@@ -1274,9 +1285,10 @@ mod tests {
                 u1: size,
                 v1: size / 2.0,
             },
+            18,
         );
         assert_eq!(mesh.solid.len(), 4);
-        let corners: Vec<[f32; 3]> = mesh.solid.iter().map(|v| v.pos).collect();
+        let corners: Vec<[f32; 3]> = mesh.solid.iter().map(|v| v.pos()).collect();
         assert!(
             corners.iter().any(|p| p[0] == size && p[2] == size / 2.0),
             "{corners:?}"
@@ -1293,7 +1305,7 @@ mod tests {
         );
     }
     fn normal(q: &[TerrainVertex; 4]) -> glam::Vec3 {
-        let p = |i: usize| glam::Vec3::from(q[i].pos);
+        let p = |i: usize| glam::Vec3::from(q[i].pos());
         (p(1) - p(0)).cross(p(2) - p(0))
     }
     #[test]
@@ -1308,7 +1320,7 @@ mod tests {
         for q in mesh.solid.as_chunks::<4>().0.iter() {
             let center = q
                 .iter()
-                .map(|v| glam::Vec3::from(v.pos))
+                .map(|v| glam::Vec3::from(v.pos()))
                 .sum::<glam::Vec3>()
                 / 4.0;
             assert!(normal(q).dot(center - glam::Vec3::splat(8.0)) > 0.0);
@@ -1341,14 +1353,14 @@ mod tests {
         assert!(
             mesh.solid
                 .iter()
-                .all(|v| (3.0..=5.0).contains(&v.pos[1]) || (8.0..=9.0).contains(&v.pos[1]))
+                .all(|v| (3.0..=5.0).contains(&v.pos()[1]) || (8.0..=9.0).contains(&v.pos()[1]))
         );
         assert!(
             mesh.solid
                 .as_chunks::<4>()
                 .0
                 .iter()
-                .any(|q| q.iter().all(|v| v.pos[1] == 8.0) && normal(q).y < 0.0)
+                .any(|q| q.iter().all(|v| v.pos()[1] == 8.0) && normal(q).y < 0.0)
         );
     }
     #[test]
@@ -1362,20 +1374,20 @@ mod tests {
             .as_chunks::<4>()
             .0
             .iter()
-            .filter(|q| q.iter().all(|v| v.pos[0] == 1.0) && normal(q).x > 0.0)
+            .filter(|q| q.iter().all(|v| v.pos()[0] == 1.0) && normal(q).x > 0.0)
             .collect();
         assert_eq!(opening.len(), 1);
         assert_eq!(
             opening[0]
                 .iter()
-                .map(|v| v.pos[1])
+                .map(|v| v.pos()[1])
                 .fold(f32::INFINITY, f32::min),
             3.0
         );
         assert_eq!(
             opening[0]
                 .iter()
-                .map(|v| v.pos[1])
+                .map(|v| v.pos()[1])
                 .fold(f32::NEG_INFINITY, f32::max),
             7.0
         );
@@ -1395,7 +1407,7 @@ mod tests {
         let mesh = mesh(&columns);
         let quads = mesh.solid.as_chunks::<4>().0;
         let bounds = |q: &[TerrainVertex; 4]| {
-            let ys = q.iter().map(|v| v.pos[1]);
+            let ys = q.iter().map(|v| v.pos()[1]);
             (
                 ys.clone().fold(f32::INFINITY, f32::min),
                 ys.fold(0.0, f32::max),
@@ -1404,7 +1416,9 @@ mod tests {
         // Over the lower neighbour: open air, lit like its top.
         let open: Vec<_> = quads
             .iter()
-            .filter(|q| q.iter().all(|v| v.pos[0] == 1.0 && v.pos[2] <= 1.0) && normal(q).x > 0.0)
+            .filter(|q| {
+                q.iter().all(|v| v.pos()[0] == 1.0 && v.pos()[2] <= 1.0) && normal(q).x > 0.0
+            })
             .collect();
         assert_eq!(open.len(), 1);
         assert_eq!(bounds(open[0]), (4.0, 10.0));
@@ -1412,7 +1426,9 @@ mod tests {
         // Into the cave: its recorded light.
         let cave: Vec<_> = quads
             .iter()
-            .filter(|q| q.iter().all(|v| v.pos[2] == 1.0 && v.pos[0] <= 1.0) && normal(q).z > 0.0)
+            .filter(|q| {
+                q.iter().all(|v| v.pos()[2] == 1.0 && v.pos()[0] <= 1.0) && normal(q).z > 0.0
+            })
             .collect();
         assert_eq!(cave.len(), 1);
         assert_eq!(bounds(cave[0]), (2.0, 6.0));
@@ -1473,7 +1489,7 @@ mod tests {
                 .as_chunks::<4>()
                 .0
                 .iter()
-                .filter(|q| q.iter().all(|v| v.pos[1] == y))
+                .filter(|q| q.iter().all(|v| v.pos()[1] == y))
                 .count()
         };
         // Closed on every side: filled, no floor or ceiling.
@@ -1483,7 +1499,7 @@ mod tests {
             closed
                 .solid
                 .iter()
-                .all(|v| v.pos[1] == 0.0 || v.pos[1] == 20.0)
+                .all(|v| v.pos()[1] == 0.0 || v.pos()[1] == 20.0)
         );
         // A lower neighbour's open air looks in: the cave stays.
         columns[cave + 1].spans = vec![span(0, 10, 1)].into();
@@ -1499,7 +1515,7 @@ mod tests {
             water
                 .translucent
                 .iter()
-                .all(|v| v.pos[1] != 7.0 && v.pos[1] != 8.0)
+                .all(|v| v.pos()[1] != 7.0 && v.pos()[1] != 8.0)
         );
         let uniform = mesh(&vec![columns[0].clone(); CELLS * CELLS]);
         assert_eq!(water.translucent.len(), uniform.translucent.len());
@@ -1526,7 +1542,7 @@ mod tests {
         assert_eq!(tops.iter().filter(|q| q[0].layer == 3).count(), 2);
         assert_eq!(tops.iter().filter(|q| q[0].light == 16).count(), 1);
         assert!(!mesh.solid.as_chunks::<4>().0.iter().any(|q| {
-            normal(q).x != 0.0 && q.iter().all(|v| v.pos[0] == 1.0 || v.pos[0] == 2.0)
+            normal(q).x != 0.0 && q.iter().all(|v| v.pos()[0] == 1.0 || v.pos()[0] == 2.0)
         }));
     }
     #[test]
@@ -1540,18 +1556,18 @@ mod tests {
                 .as_chunks::<4>()
                 .0
                 .iter()
-                .any(|q| q.iter().all(|v| v.pos[1] == 3.0) && normal(q).y > 0.0)
+                .any(|q| q.iter().all(|v| v.pos()[1] == 3.0) && normal(q).y > 0.0)
         );
         assert!(
             mesh.translucent
                 .as_chunks::<4>()
                 .0
                 .iter()
-                .all(|q| !(q.iter().all(|v| v.pos[0] == 1.0) && normal(q).x != 0.0))
+                .all(|q| !(q.iter().all(|v| v.pos()[0] == 1.0) && normal(q).x != 0.0))
         );
         assert!(mesh.translucent.as_chunks::<4>().0.iter().any(|q| {
             q.iter()
-                .all(|v| (v.pos[1] - (6.0 - 1.0 / 9.0)).abs() < 0.001)
+                .all(|v| (v.pos()[1] - (6.0 - 1.0 / 9.0)).abs() <= 1.0 / 64.0 + 1e-4)
                 && normal(q).y > 0.0
         }));
     }
@@ -1615,9 +1631,9 @@ mod tests {
             .collect();
         assert_eq!(walls.len(), 1);
         let wall = walls[0];
-        assert!(wall.iter().all(|v| v.pos[0] == 0.0
-            && (1.0..=2.0).contains(&v.pos[2])
-            && (8.0..=16.0).contains(&v.pos[1])));
+        assert!(wall.iter().all(|v| v.pos()[0] == 0.0
+            && (1.0..=2.0).contains(&v.pos()[2])
+            && (8.0..=16.0).contains(&v.pos()[1])));
         assert_eq!(normal(wall).length(), 8.0);
     }
     #[test]
@@ -1664,8 +1680,11 @@ mod tests {
             .collect();
         assert_eq!(sides.len(), 2);
         for q in sides {
-            let min = q.iter().map(|v| v.pos[1]).fold(f32::INFINITY, f32::min);
-            let max = q.iter().map(|v| v.pos[1]).fold(f32::NEG_INFINITY, f32::max);
+            let min = q.iter().map(|v| v.pos()[1]).fold(f32::INFINITY, f32::min);
+            let max = q
+                .iter()
+                .map(|v| v.pos()[1])
+                .fold(f32::NEG_INFINITY, f32::max);
             if normal(q).x > 0.0 {
                 assert_eq!((min, max), (8.0, 16.0));
             } else {
@@ -1701,7 +1720,7 @@ mod tests {
             }
             let center = q
                 .iter()
-                .map(|v| glam::Vec3::from(v.pos))
+                .map(|v| glam::Vec3::from(v.pos()))
                 .sum::<glam::Vec3>()
                 / 4.0;
             !(center.x < 16.0 && center.z < 16.0)
@@ -1712,14 +1731,14 @@ mod tests {
             .0
             .iter()
             .filter(|q| {
-                (q.iter().all(|v| v.pos[0] == 16.0) && normal(q).x < 0.0)
-                    || (q.iter().all(|v| v.pos[2] == 16.0) && normal(q).z < 0.0)
+                (q.iter().all(|v| v.pos()[0] == 16.0) && normal(q).x < 0.0)
+                    || (q.iter().all(|v| v.pos()[2] == 16.0) && normal(q).z < 0.0)
             })
             .collect();
         assert_eq!(cuts.len(), 2);
         assert!(
             cuts.iter()
-                .all(|q| q.iter().all(|v| (10.0..=12.0).contains(&v.pos[1]))),
+                .all(|q| q.iter().all(|v| (10.0..=12.0).contains(&v.pos()[1]))),
             "cut faces keep finite voxel bounds"
         );
     }

@@ -203,6 +203,13 @@ struct MeshSettings {
     smooth_lighting: bool,
     cutout_leaves: bool,
 }
+#[derive(Clone, Copy, Default)]
+struct LeafColumn {
+    far: bool,
+    leaves: SectionMask,
+}
+const LEAF_BAND_HYSTERESIS: i32 = 2;
+const LEAF_COLUMNS_PER_FRAME: usize = 8;
 enum Job {
     Generate(i32, i32),
     /// A region to decorate, with the final chunks in it (region index and
@@ -363,6 +370,7 @@ pub struct Streaming {
     order: u64,
     /// Ticks since the columns and protos that fell out of range were swept.
     scan_age: u8,
+    decorated_stale: bool,
     /// The centre and radius the sweep was last reset for.
     scan_area: ((i32, i32), i32),
     generating: FxHashSet<(i32, i32)>,
@@ -396,7 +404,7 @@ pub struct Streaming {
     /// `ChunkGenerator::decorates_beside_final`.
     saves_beside_final: bool,
     lighting: FxHashMap<(i32, i32), u64>,
-    meshing: FxHashMap<(i32, i32, i32), u64>,
+    meshing: FxHashMap<(i32, i32, i32), (u64, bool)>,
     /// The sequence each section's latest accepted mesh was dispatched at
     /// (`CompiledSectionMesh.compileTaskStartTimeNs`).
     compile_started: FxHashMap<(i32, i32, i32), u64>,
@@ -436,6 +444,10 @@ pub struct Streaming {
     /// The `ao` and `cutoutLeaves` options.
     pub smooth_lighting: bool,
     pub cutout_leaves: bool,
+    view_cap: i32,
+    leaf_distance: u32,
+    leaf_center: (i32, i32),
+    leafy: FxHashMap<(i32, i32), LeafColumn>,
     /// Incremental relighting of block edits on lit chunks (see `light::relight`).
     light_tables: Arc<LightTables>,
     /// Applied edits by sequence, replayed onto light jobs snapshotted before them.
@@ -548,8 +560,8 @@ impl GenerationScan {
                     x1 = x1.max(next_x1);
                 }
                 for x in x0..=x1 {
-                    if !input.ranges.requested(x, z, input.decorates)
-                        || input.world.chunks.contains_key(&(x, z))
+                    if input.world.chunks.contains_key(&(x, z))
+                        || !input.ranges.requested(x, z, input.decorates)
                         || input.generating.contains(&(x, z))
                         || input.protos.contains_key(&(x, z))
                         || input.finishing.contains(&(x, z))
@@ -811,6 +823,7 @@ impl Streaming {
             threads,
             order: 0,
             scan_age: 0,
+            decorated_stale: false,
             scan_area: ((i32::MIN, i32::MIN), i32::MIN),
             generating: Default::default(),
             generation_scan: GenerationScan::default(),
@@ -851,6 +864,10 @@ impl Streaming {
             biome_blend: 2,
             smooth_lighting: true,
             cutout_leaves: true,
+            view_cap: 0,
+            leaf_distance: 0,
+            leaf_center: (i32::MIN, i32::MIN),
+            leafy: Default::default(),
             light_tables,
             light_log: Vec::new(),
             light_edit_sequence: 0,
@@ -1056,6 +1073,7 @@ impl Streaming {
         // neighbours were decorated around it, so generating it again would
         // not give it back.
         if !self.ranges().chunk_kept(key.0, key.1, self.decorates) {
+            self.decorated_stale = true;
             if chunk.fresh {
                 self.dropped_new.insert(key);
                 self.saves.save_finished(chunk);
@@ -1261,6 +1279,7 @@ impl Streaming {
         if self.paused {
             return (uploads, Vec::new());
         }
+        crate::spans::restart();
         ExtraCover::refresh(&mut self.cover, &self.extra);
         // The sweeps below walk every loaded column and proto chunk. Run them
         // at once when the view moves and every eighth tick otherwise: a
@@ -1334,10 +1353,13 @@ impl Streaming {
                     }
                 }
                 Done::Meshed(x, sy, z, mesh, seq) => {
-                    if self.meshing.get(&(x, sy, z)) != Some(&seq) {
-                        stale.push(((x, sy, z), mesh));
-                        continue;
-                    }
+                    let built_far = match self.meshing.get(&(x, sy, z)) {
+                        Some(&(s, far)) if s == seq => far,
+                        _ => {
+                            stale.push(((x, sy, z), mesh));
+                            continue;
+                        }
+                    };
                     // Its column unloaded while it was meshed: nothing would
                     // ever remove the uploaded section.
                     if !world.chunks.contains_key(&(x, z)) {
@@ -1348,11 +1370,22 @@ impl Streaming {
                     self.meshing.remove(&(x, sy, z));
                     self.compile_started.insert((x, sy, z), seq);
                     self.meshed_total += 1;
+                    if let Some(column) = self.leafy.get_mut(&(x, z)) {
+                        if mesh.leaves {
+                            column.leaves.insert(sy as usize);
+                            if column.far != built_far {
+                                world.dirty_sections.insert((x, sy, z));
+                            }
+                        } else {
+                            column.leaves.remove(sy as usize);
+                        }
+                    }
                     uploads.push(((x, sy, z), mesh));
                 }
             }
         }
         self.free(stale);
+        crate::spans::mark("st_receive");
         let mut removed = Vec::new();
         if sweep {
             // Unload far columns.
@@ -1372,6 +1405,7 @@ impl Streaming {
                 }
                 self.lit.remove(key);
                 self.meshed.remove(key);
+                self.leafy.remove(key);
                 self.lighting.remove(key);
                 self.light_snapshots.remove(key);
             }
@@ -1421,37 +1455,45 @@ impl Streaming {
             }
             self.save_checked_out(written);
         }
+        crate::spans::mark("st_sweep");
         let (protos, finishing) = (&self.protos, &self.finishing);
-        self.decorated.retain(|k| {
-            protos.contains_key(k) || finishing.contains(k) || world.chunks.contains_key(k)
-        });
-        // Finalize chunks whose neighbourhood is decorated.
-        let candidates: Vec<(i32, i32)> = self.protos.keys().copied().collect();
-        for (x, z) in candidates {
-            if world.chunks.contains_key(&(x, z))
-                || self.finishing.contains(&(x, z))
-                || !self.in_range(x, z, 1)
-            {
-                continue;
-            }
-            let ready = (-1..=1).all(|dz| {
-                (-1..=1).all(|dx| {
-                    self.decorated.contains(&(x + dx, z + dz))
-                        || world.chunks.contains_key(&(x + dx, z + dz))
-                })
+        let stale = std::mem::take(&mut self.decorated_stale);
+        if sweep || stale {
+            self.decorated.retain(|k| {
+                protos.contains_key(k) || finishing.contains(k) || world.chunks.contains_key(k)
             });
-            if ready && let Some(Some(_)) = self.protos.get(&(x, z)) {
-                let proto = self
-                    .protos
-                    .remove(&(x, z))
-                    .flatten()
-                    .expect("present proto");
-                self.light_views.remove(&(x, z));
-                self.finishing.insert((x, z));
-                self.written.remove(&(x, z));
-                self.submit(Some((x, z)), 0, Job::Finish(proto));
-            }
         }
+        crate::spans::mark("st_retain");
+        // Finalize chunks whose neighbourhood is decorated.
+        let ready: Vec<(i32, i32)> = self
+            .protos
+            .iter()
+            .filter(|&(&(x, z), p)| {
+                p.is_some()
+                    && self.in_range(x, z, 1)
+                    && !world.chunks.contains_key(&(x, z))
+                    && !self.finishing.contains(&(x, z))
+                    && (-1..=1).all(|dz| {
+                        (-1..=1).all(|dx| {
+                            self.decorated.contains(&(x + dx, z + dz))
+                                || world.chunks.contains_key(&(x + dx, z + dz))
+                        })
+                    })
+            })
+            .map(|(k, _)| *k)
+            .collect();
+        for (x, z) in ready {
+            let proto = self
+                .protos
+                .remove(&(x, z))
+                .flatten()
+                .expect("present proto");
+            self.light_views.remove(&(x, z));
+            self.finishing.insert((x, z));
+            self.written.remove(&(x, z));
+            self.submit(Some((x, z)), 0, Job::Finish(proto));
+        }
+        crate::spans::mark("st_finalize");
         // Decorate chunks whose 3x3 proto neighbourhood is available, in
         // vanilla's order: decoration is order dependent where write regions
         // overlap (see `DecorationOrder`).
@@ -1480,11 +1522,12 @@ impl Streaming {
                     || generating.contains(&(x, z))
             });
         }
+        crate::spans::mark("st_dec_order");
         if self.decorates && self.decorating < workers * 2 {
             let wants = |s: &Self, x: i32, z: i32| {
-                !s.decorated.contains(&(x, z))
+                (s.in_range(x, z, 2) || s.near_finished(x, z, 1))
+                    && !s.decorated.contains(&(x, z))
                     && !world.chunks.contains_key(&(x, z))
-                    && (s.in_range(x, z, 2) || s.near_finished(x, z, 1))
             };
             // A wanted chunk holds back higher-ranked ones only if it can be
             // decorated: its 3x3 neighbourhood is (or will be) generated as
@@ -1517,14 +1560,24 @@ impl Streaming {
                 w.0 = self.decoration_order.rank_or_append(w.2, w.3);
             }
             wanted.sort_unstable();
+            crate::spans::mark("st_dec_wanted");
+            let pending_memo = std::cell::RefCell::new(FxHashMap::<(i32, i32), bool>::default());
             for (_, _, x, z) in wanted {
                 if self.decorating >= workers * 2 {
                     break;
                 }
-                if self
-                    .decoration_order
-                    .blocked(x, z, |nx, nz| waits_for(self, nx, nz))
+                let neighbour = |i: i32| (x + (i % 3) - 1, z + (i / 3) - 1);
+                if !(0..9).all(|i| matches!(self.protos.get(&neighbour(i)), Some(Some(_))))
+                    && !(0..9).any(|i| world.chunks.contains_key(&neighbour(i)))
                 {
+                    continue;
+                }
+                if self.decoration_order.blocked(x, z, |nx, nz| {
+                    *pending_memo
+                        .borrow_mut()
+                        .entry((nx, nz))
+                        .or_insert_with(|| waits_for(self, nx, nz))
+                }) {
                     continue;
                 }
                 let keys: Vec<(i32, i32)> =
@@ -1544,6 +1597,7 @@ impl Streaming {
                     .collect();
                 if !finals.is_empty() && !self.saves_beside_final {
                     self.decorated.insert((x, z));
+                    pending_memo.borrow_mut().clear();
                     continue;
                 }
                 if !keys.iter().enumerate().all(|(i, k)| {
@@ -1576,7 +1630,9 @@ impl Streaming {
                 self.submit(Some((x, z)), 1, Job::Decorate(x, z, region, finals));
             }
         }
+        crate::spans::mark("st_decorate");
         self.schedule_generation(world, workers);
+        crate::spans::mark("st_generate");
         // Lighting once all neighbours exist, nearest first and only as
         // much of it as the workers can chew. Vanilla's light engine also
         // hands a bounded queue to its workers and reschedules what did
@@ -1614,6 +1670,7 @@ impl Streaming {
                 Job::Light(x, z, region, self.sequence, self.sky_light),
             );
         }
+        crate::spans::mark("st_light");
         // A server draws nothing: its sections are never meshed.
         if !self.mesh {
             world.dirty_sections.clear();
@@ -1624,25 +1681,22 @@ impl Streaming {
         // vanilla draws). Sections set aside past it come back
         // when the player moves: a column that loads with its light gets no
         // other request (#228).
-        let area = (self.center, self.radius, self.forced.len());
+        let area = (self.center, self.view_radius(), self.forced.len());
         if self.waiting_area != area {
             self.waiting_area = area;
-            let ranges = Ranges {
-                center: self.center,
-                radius: self.radius,
-                extra: &self.extra,
-                forced: &self.forced,
-                cover: ExtraCover::matching(&self.cover, &self.extra),
-                band: self.band.as_ref(),
-            };
-            self.waiting.retain(|&(x, sy, z)| {
-                let back = ranges.in_view(x, z);
-                if back {
-                    world.dirty_sections.insert((x, sy, z));
-                }
-                !back
-            });
+            let waiting = std::mem::take(&mut self.waiting);
+            self.waiting = waiting
+                .into_iter()
+                .filter(|&(x, sy, z)| {
+                    let back = self.in_view(x, z);
+                    if back {
+                        world.dirty_sections.insert((x, sy, z));
+                    }
+                    !back
+                })
+                .collect();
         }
+        self.retune_leaves(world);
         // Column by column: the checks below hold for all of a column's
         // sections, and columns waiting for light cost one look per frame.
         let mut candidates: Vec<(i64, i32, i32, SectionMask)> = Vec::new();
@@ -1652,7 +1706,7 @@ impl Streaming {
                 world.dirty_sections.take_column(x, z);
                 continue;
             }
-            if !self.ranges().in_view(x, z) {
+            if !self.in_view(x, z) {
                 world.dirty_sections.take_column(x, z);
                 for sy in sections.iter().map(|sy| sy as i32) {
                     self.waiting.insert((x, sy, z));
@@ -1690,10 +1744,12 @@ impl Streaming {
                 continue;
             };
             world.dirty_sections.take_column(x, z);
+            let far_leaves = self.leaves_far(x, z);
+            let cutout_leaves = self.cutout_leaves && !far_leaves;
             for sy in sections.iter().map(|sy| sy as i32) {
                 let first = self.meshed.insert((x, z));
                 self.sequence += 1;
-                self.meshing.insert((x, sy, z), self.sequence);
+                self.meshing.insert((x, sy, z), (self.sequence, far_leaves));
                 self.submit(
                     Some((x, z)),
                     if first { 2 } else { 0 },
@@ -1709,13 +1765,96 @@ impl Streaming {
                             zoom: self.biome_zoom,
                             blend_radius: self.biome_blend,
                             smooth_lighting: self.smooth_lighting,
-                            cutout_leaves: self.cutout_leaves,
+                            cutout_leaves,
                         },
                     ),
                 );
             }
         }
+        crate::spans::mark("st_mesh");
         (uploads, removed)
+    }
+    pub fn set_leaf_distance(&mut self, chunks: u32) -> bool {
+        let changed = self.leaf_distance != chunks;
+        if changed {
+            self.leaf_distance = chunks;
+            self.leafy.clear();
+            self.leaf_center = (i32::MIN, i32::MIN);
+        }
+        changed
+    }
+    pub fn set_view_cap(&mut self, chunks: i32) {
+        self.view_cap = chunks.max(0);
+    }
+    pub fn view_radius(&self) -> i32 {
+        if self.view_cap > 0 {
+            self.view_cap.min(self.radius)
+        } else {
+            self.radius
+        }
+    }
+    fn in_view(&self, x: i32, z: i32) -> bool {
+        in_view_distance(self.center, self.view_radius(), x, z) || self.forced.contains(&(x, z))
+    }
+    pub fn leaf_distance(&self) -> u32 {
+        self.leaf_distance
+    }
+    pub fn leaf_columns(&self) -> [usize; 3] {
+        [
+            self.leafy.len(),
+            self.leafy.values().filter(|c| c.far).count(),
+            self.leafy.values().filter(|c| !c.leaves.is_empty()).count(),
+        ]
+    }
+    fn leaf_ring(&self, x: i32, z: i32) -> i32 {
+        (x - self.center.0).abs().max((z - self.center.1).abs())
+    }
+    fn leaves_far(&mut self, x: i32, z: i32) -> bool {
+        if self.leaf_distance == 0 {
+            return false;
+        }
+        let far = self.leaf_ring(x, z) > self.leaf_distance as i32;
+        self.leafy
+            .entry((x, z))
+            .or_insert(LeafColumn {
+                far,
+                leaves: SectionMask::EMPTY,
+            })
+            .far
+    }
+    fn retune_leaves(&mut self, world: &mut World) {
+        if self.leaf_distance == 0 || self.center == self.leaf_center {
+            return;
+        }
+        let band = self.leaf_distance as i32;
+        let center = self.center;
+        let mut budget = LEAF_COLUMNS_PER_FRAME;
+        let mut deferred = false;
+        for (&(x, z), column) in self.leafy.iter_mut() {
+            let ring = (x - center.0).abs().max((z - center.1).abs());
+            let far = if column.far {
+                ring > band
+            } else {
+                ring > band + LEAF_BAND_HYSTERESIS
+            };
+            if far == column.far {
+                continue;
+            }
+            if !column.leaves.is_empty() {
+                if budget == 0 {
+                    deferred = true;
+                    continue;
+                }
+                budget -= 1;
+                for sy in column.leaves.iter() {
+                    world.dirty_sections.insert((x, sy as i32, z));
+                }
+            }
+            column.far = far;
+        }
+        if !deferred {
+            self.leaf_center = center;
+        }
     }
     fn schedule_generation(&mut self, world: &World, workers: usize) {
         let input = GenerationInputs {
@@ -2261,11 +2400,6 @@ impl Ranges<'_> {
         self.extra
             .iter()
             .any(|&(c, radius)| (x - c.0).abs().max((z - c.1).abs()) <= radius + margin)
-    }
-    /// The columns meshed for drawing: those vanilla draws around the
-    /// player (`in_view_distance`), and forced ones.
-    fn in_view(&self, x: i32, z: i32) -> bool {
-        in_view_distance(self.center, self.radius, x, z) || self.forced.contains(&(x, z))
     }
     fn in_main_range(&self, x: i32, z: i32, margin: i32) -> bool {
         let r = i64::from(self.radius + margin);

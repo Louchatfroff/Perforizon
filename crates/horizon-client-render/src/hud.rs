@@ -1763,7 +1763,7 @@ impl HudRenderer {
                     })],
                 }),
                 multiview_mask: None,
-                cache: None,
+                cache: crate::gfx::pipeline_cache::get(),
             })
         };
         let pipeline = create("HUD", wgpu::BlendState::ALPHA_BLENDING, "fs_main", false);

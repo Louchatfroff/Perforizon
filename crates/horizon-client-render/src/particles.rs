@@ -1045,6 +1045,24 @@ impl ParticleLevel<'_> {
 }
 
 /// `ParticleEngine` plus the sprite sets of `ParticleResources`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ParticleFilter {
+    pub explosions: bool,
+    pub potions: bool,
+    pub smoke: bool,
+    pub crit_multiplier: u8,
+}
+impl ParticleFilter {
+    fn hides(&self, ty: ParticleType) -> bool {
+        use ParticleType as T;
+        match ty {
+            T::Explosion | T::ExplosionEmitter | T::SonicBoom => self.explosions,
+            T::Effect | T::EntityEffect | T::InstantEffect | T::Witch => self.potions,
+            T::Smoke | T::LargeSmoke | T::WhiteSmoke => self.smoke,
+            _ => false,
+        }
+    }
+}
 pub struct ParticleEngine {
     particles: Vec<Particle>,
     pending: Vec<Particle>,
@@ -1076,6 +1094,8 @@ pub struct ParticleEngine {
     pub camera: [f64; 3],
     /// The Particles option (`ParticleStatus`): 0 all, 1 decreased, 2 minimal.
     pub particle_level: u8,
+    /// PvP filters: hide explosions, potion effects or smoke, and multiply critical hits.
+    pub filter: ParticleFilter,
     /// FireworkParticles.Starter instances.
     starters: Vec<Starter>,
     /// Local sounds requested by particles (dripstone drips, firework bursts):
@@ -1112,6 +1132,7 @@ impl ParticleEngine {
             starters: Vec::new(),
             camera: [0.0; 3],
             particle_level: 0,
+            filter: ParticleFilter::default(),
             sounds: Vec::new(),
             made: Default::default(),
             item_sprites: HashMap::new(),
@@ -1303,6 +1324,14 @@ impl ParticleEngine {
         if let Some(requested) = &mut self.requested {
             requested.push((options.clone(), p, v));
             return;
+        }
+        if self.filter.hides(options.ty) {
+            return;
+        }
+        if options.ty == ParticleType::Crit && self.filter.crit_multiplier > 1 {
+            for _ in 1..self.filter.crit_multiplier {
+                self.create(options, p, v);
+            }
         }
         let minimal = self.calculate_particle_level(always_show) == 2;
         if override_limiter || options.ty.override_limiter() || (d2 <= 1024.0 && !minimal) {
@@ -4103,9 +4132,28 @@ impl ParticleEngine {
         light_at: &dyn Fn([i32; 3]) -> u8,
         out: &mut Vec<Vertex>,
     ) {
+        self.render_split(camera, yaw, pitch, partial, light_at, None, out);
+    }
+
+    /// `render`, with the plain camera-facing quads handed to `instances` instead of `out`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_split(
+        &self,
+        camera: DVec3,
+        yaw: f32,
+        pitch: f32,
+        partial: f32,
+        light_at: &dyn Fn([i32; 3]) -> u8,
+        mut instances: Option<&mut crate::gfx::gpu_particles::ParticleInstances>,
+        out: &mut Vec<Vertex>,
+    ) {
         // Camera.setRotation: rotationYXZ(PI - yRot, -xRot, 0).
         let base = Quat::from_rotation_y(std::f32::consts::PI - yaw.to_radians())
             * Quat::from_rotation_x(-pitch.to_radians());
+        if let Some(instances) = instances.as_deref_mut() {
+            instances.right = (base * FVec3::X).to_array();
+            instances.up = (base * FVec3::Y).to_array();
+        }
         for p in &self.particles {
             if p.no_render {
                 continue;
@@ -4153,6 +4201,7 @@ impl ParticleEngine {
                 alpha = lifetime_alpha(la, p.age, p.lifetime, partial);
             }
             let mut rotations = [Some(rotation), None];
+            let mut plain = true;
             let mut rgb = [p.rgba[0], p.rgba[1], p.rgba[2]];
             match p.behaviour {
                 // ShriekParticle.extract: two tilted quads, fading out.
@@ -4160,6 +4209,7 @@ impl ParticleEngine {
                     if delay > 0 {
                         continue;
                     }
+                    plain = false;
                     alpha = 1.0 - ((p.age as f32 + partial) / p.lifetime as f32).clamp(0.0, 1.0);
                     rotations = [
                         Some(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_3)),
@@ -4179,6 +4229,7 @@ impl ParticleEngine {
                     pitch_o,
                     ..
                 } => {
+                    plain = false;
                     let sway =
                         ((p.age as f32 + partial - std::f32::consts::TAU) * 0.05).sin() * 2.0;
                     let lerped_rot = rot_o + (rot - rot_o) * partial;
@@ -4221,6 +4272,33 @@ impl ParticleEngine {
                 r.u0 + du * p.uv[2],
                 r.v0 + dv * p.uv[3],
             );
+            if plain && let Some(instances) = instances.as_deref_mut() {
+                let roll = if p.roll != 0.0 {
+                    p.o_roll + (p.roll - p.o_roll) * partial
+                } else {
+                    0.0
+                };
+                let layer_bits = if layer {
+                    crate::gfx::TRANSLUCENT_PARTICLE_OVERLAY
+                } else {
+                    0
+                } | u32::from(hdr_tier(p.ty)) << 16;
+                let instance = crate::gfx::gpu_particles::ParticleInstance {
+                    center: center.to_array(),
+                    size,
+                    uv: [u0, v0, u1, v1],
+                    roll,
+                    color,
+                    light,
+                    layer: layer_bits,
+                };
+                if layer {
+                    instances.translucent.push(instance);
+                } else {
+                    instances.opaque.push(instance);
+                }
+                continue;
+            }
             for rotation in rotations.into_iter().flatten() {
                 for (n, uv) in [
                     ((1.0, -1.0), [u1, v1]),
@@ -4356,6 +4434,86 @@ mod tests {
                 .is_none()
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn instanced_quads_expand_to_the_vertices_the_cpu_path_builds() {
+        let rect = |u0, v0| Rect {
+            u0,
+            v0,
+            u1: u0 + 0.125,
+            v1: v0 + 0.25,
+            w: 16,
+            h: 16,
+        };
+        let atlas = HashMap::from([
+            ("block/stone".to_owned(), rect(0.25, 0.5)),
+            ("block/glass".to_owned(), rect(0.5, 0.25)),
+        ]);
+        let translucent = HashSet::from(["block/glass".to_owned()]);
+        let mut engine = ParticleEngine::new(Path::new(""), &atlas, &translucent);
+        let mut random = LegacyRandom::new(5);
+        for (i, name) in ["block/stone", "block/glass", "block/stone"]
+            .iter()
+            .enumerate()
+        {
+            let mut p = Particle::terrain(
+                &mut random,
+                [3.0 + i as f64, 70.5, -2.25],
+                [0.0; 3],
+                (*name).to_owned(),
+                0xff80_4020,
+            );
+            p.previous = [2.5 + i as f64, 70.0, -2.0];
+            if i == 2 {
+                p.roll = 0.9;
+                p.o_roll = 0.3;
+            }
+            engine.particles.push(p);
+        }
+        let camera = DVec3::new(1.0, 72.0, 4.0);
+        let light = |_: [i32; 3]| 0xa5u8;
+        let mut cpu = Vec::new();
+        engine.render(camera, 33.0, -12.0, 0.4, &light, &mut cpu);
+        let mut rest = Vec::new();
+        let mut instances = crate::gfx::gpu_particles::ParticleInstances::default();
+        engine.render_split(
+            camera,
+            33.0,
+            -12.0,
+            0.4,
+            &light,
+            Some(&mut instances),
+            &mut rest,
+        );
+        assert!(rest.is_empty());
+        assert_eq!(
+            (
+                cpu.len(),
+                instances.opaque.len(),
+                instances.translucent.len()
+            ),
+            (12, 2, 1)
+        );
+        assert_eq!(instances.translucent.len(), 1);
+        let mut gpu: Vec<Vertex> = Vec::new();
+        for i in [
+            &instances.opaque[0],
+            &instances.translucent[0],
+            &instances.opaque[1],
+        ] {
+            gpu.extend(i.vertices(instances.right, instances.up));
+        }
+        assert_eq!(cpu.len(), gpu.len());
+        for (c, g) in cpu.iter().zip(&gpu) {
+            for axis in 0..3 {
+                assert!((c.pos[axis] - g.pos[axis]).abs() < 1e-4, "{c:?} {g:?}");
+            }
+            assert_eq!(
+                (c.uv, c.layer, c.color, c.light),
+                (g.uv, g.layer, g.color, g.light)
+            );
+        }
     }
 
     #[test]

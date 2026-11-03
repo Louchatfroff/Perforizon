@@ -199,7 +199,7 @@ impl Panorama {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: crate::gfx::pipeline_cache::get(),
         });
         Self {
             pipeline,
