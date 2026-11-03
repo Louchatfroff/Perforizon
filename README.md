@@ -1,5 +1,3 @@
-> Perforizon (work in progress): performance fork of Horizon.
-
 <p align="center">
   <img src="docs/media/banner.webp" alt="Perforizon: Horizon, tuned for frame rate and input latency" width="100%">
 </p>
