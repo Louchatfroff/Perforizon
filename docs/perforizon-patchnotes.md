@@ -1,6 +1,6 @@
 # Perforizon patch notes
 
-## 0.1.0 (unreleased)
+## 0.1.0
 
 First Perforizon build, forked from Horizon (Minecraft Java 26.3 in Rust). World generation is bit-identical.
 
@@ -32,7 +32,7 @@ First Perforizon build, forked from Horizon (Minecraft Java 26.3 in Rust). World
 
 ### Optimization wave 2 (opt-in, the auto-tune decides)
 All of these are off by default. On the RTX 4060 Ti test machine only Far LOD paid off; the others are correct but showed no gain or were within noise, so the auto-tune keeps them off there. Other GPUs may differ.
-- Far LOD (`farLodCoarse`): coarser distant terrain tiles, +34 to +56% fps at render distance 32 with the handoff at 10 chunks. Changes pixels (flatter distant trees); not in 100% parity.
+- Far LOD (`farLodCoarse`): coarser distant terrain tiles, +26% to +107% fps in mountain, forest and ocean at render distance 32 with the handoff at 10 chunks, but -13% in village; the auto-tune keeps it only when the four-scene score improves. Changes pixels (flatter distant trees); not in 100% parity.
 - Vertex pool (`vertexPool`): one big terrain buffer, draw runs 220 to 3; a few percent on this GPU.
 - Binary greedy meshing (`binaryGreedy`): sort-free merge, 1.2x to 2.4x faster merge step; total meshing time not measured.
 - Hi-Z occlusion (`hizOcclusion`): no gain here (about 10% slower), left off.

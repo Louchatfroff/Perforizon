@@ -22,7 +22,7 @@
 
 # Perforizon
 
-A performance fork of Horizon: same worlds, same world generation (bit-identical), faster frames and lower input latency. At render distance 32 on an RTX 4060 Ti it averages +18% to +48% fps over stock Horizon with default settings (up to +145% once the auto-tune enables Far LOD), and has better 1% and 0.1% lows in every benchmark scene ([benchmarks](docs/perforizon-benchmarks.md)). It adds an in-game **Auto-tune**, an Optimization Mode (Performance or 100% parity), more antialiasing modes and a PvP module.
+A performance fork of Horizon: same worlds, same world generation (bit-identical), faster frames and lower input latency. At render distance 32 on an RTX 4060 Ti it averages +5% to +44% fps over Horizon with default settings (up to +107% in forest and ocean once the auto-tune enables Far LOD), and has better 1% and 0.1% lows in every benchmark scene ([benchmarks](docs/perforizon-benchmarks.md)). It adds an in-game **Auto-tune**, an Optimization Mode (Performance or 100% parity), more antialiasing modes and a PvP module.
 
 - [Install and use the Auto-tune](docs/perforizon-autotune.md)
 - [Patch notes](docs/perforizon-patchnotes.md) · [Technical details](docs/perforizon-technical.md) · [Installing and releasing](docs/perforizon-install.md)

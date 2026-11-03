@@ -1,6 +1,6 @@
 # Auto-tune: installing Perforizon and getting the most frames
 
-Perforizon is a performance fork of Horizon. Its defaults are already faster than stock Horizon; the in-game
+Perforizon is a performance fork of Horizon. Its defaults are already faster than Horizon; the in-game
 auto-tune measures your machine and keeps the settings that run best on it.
 
 ## 1. Install
@@ -22,7 +22,7 @@ of Minecraft Java 26.3, as for Horizon (`PLAY.txt` in the install folder).
 | Mode | What it does |
 | --- | --- |
 | **Performance** (default) | Allows every optimization that changes a few pixels: greedy meshing, solid distant leaves (`leafDistance`), merged water faces, and the auto-tune can lower the resolution scale. Game logic and world generation are untouched. |
-| **100% parity** | Turns off every optimization that changes pixels. Frames match stock Horizon's picture; only lossless speedups stay. Auto-tune never lowers the resolution scale and never tries the pixel-changing options. |
+| **100% parity** | Turns off every optimization that changes pixels. Frames match Horizon's picture; only lossless speedups stay. Auto-tune never lowers the resolution scale and never tries the pixel-changing options. |
 
 The same switch from the command line: `horizon-ctl perf-mode` is a frame-cap helper for benchmarks; the mode itself is
 `horizon-ctl graphics optimizationMode performance|parity`.
@@ -129,5 +129,5 @@ The GPU is the limit at high render distances (the opaque terrain pass is 58 to 
 distance 32), so lowering render distance or resolution scale is the biggest lever. Results vary with your GPU:
 run the auto-tune once per machine and once after changing render distance. If you change shader packs, run it again.
 
-Benchmark numbers against stock Horizon are in [perforizon-benchmarks.md](perforizon-benchmarks.md); how each
+Benchmark numbers against Horizon are in [perforizon-benchmarks.md](perforizon-benchmarks.md); how each
 optimization works is in [perforizon-technical.md](perforizon-technical.md).
