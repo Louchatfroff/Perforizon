@@ -37,7 +37,6 @@ mod multiplayer_page;
 mod new_instance;
 mod owner_page;
 mod packs_page;
-mod partner;
 mod perf;
 mod plate;
 mod profile_heads;
@@ -47,20 +46,19 @@ mod servers_page;
 mod shell;
 mod shortcut_page;
 mod skin_page;
-mod sky;
-mod specimen;
 mod switch_page;
 mod theme;
 mod themes_page;
 mod titlebar;
+mod tui;
 mod while_playing;
 mod worlds_page;
 
 use gpui::{
-    actions, div, ease_out_quint, prelude::*, px, relative, size, Animation, AnimationExt,
-    AnyElement, App, Bounds, ClickEvent, Context, Div, ElementId, FocusHandle, FontWeight, Hsla,
-    KeyBinding, KeyDownEvent, Menu, MenuItem, MouseDownEvent, PathPromptOptions, Pixels, Point,
-    SharedString, Stateful, Subscription, Window, WindowBounds, WindowOptions,
+    actions, div, ease_out_quint, prelude::*, px, size, Animation, AnimationExt, AnyElement, App,
+    Bounds, ClickEvent, Context, Div, ElementId, FocusHandle, FontWeight, Hsla, KeyBinding,
+    KeyDownEvent, Menu, MenuItem, MouseDownEvent, PathPromptOptions, Pixels, Point, SharedString,
+    Stateful, Subscription, Window, WindowBounds, WindowOptions,
 };
 use horizon_launcher::account::{self, Accounts, SignIn, SignInState};
 use horizon_launcher::backend::{self, Job, Msg, Release, Running, Settings, Updates};
@@ -216,11 +214,6 @@ struct Launcher {
     native_mismatch: Option<String>,
     confirm_remove: Option<String>,
     picker_open: bool,
-    /// Where the accent picker's hue strip is on screen (`themes_page.rs`), to map a click to a
-    /// hue.
-    hue_area: std::rc::Rc<std::cell::Cell<Option<Bounds<gpui::Pixels>>>>,
-    /// A drag on that strip is in flight, so a release anywhere writes the accent down.
-    hue_dragging: bool,
     /// Settings > Language's dropdown (`language_page.rs`).
     language_menu: bool,
     /// The top bar's quick switch of who plays (`switch_page.rs`).
@@ -230,10 +223,8 @@ struct Launcher {
     menu_closed_at: Option<Point<Pixels>>,
     /// Settings > Account's skin panel for an offline name (`skin_page.rs`).
     skin: Option<skin_page::SkinPanel>,
-    /// Why the last picture for Home's background was refused.
-    background_error: Option<String>,
     settings: Settings,
-    /// The Discord, sponsor and website links: built in until links.json on main has been read.
+    /// The GitHub link: built in until links.json on main has been read.
     links: backend::Links,
     preparing: bool,
     prepare_log: VecDeque<String>,
@@ -309,7 +300,6 @@ struct Launcher {
     official_players: Option<u64>,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
-    _appearance: Subscription,
     /// Redraws when the window gains or loses focus: the sky moves only in front.
     _activation: Subscription,
     /// The session's measurements (`perf.rs`), and when the steps they time began.
@@ -364,9 +354,6 @@ struct Launcher {
     /// The player's servers, for the sidebar until the Servers page has read them.
     side_servers: Vec<horizon_launcher::servers::Entry>,
     /// The pixel art made for this window (`art.rs`), and pictures downloaded by URL.
-    sky: sky::Sky,
-    /// When the sky next asks for a frame, and the timer that will draw it.
-    sky_wake: Option<(Instant, gpui::Task<()>)>,
     /// The window's scale, as of its last frame, for art drawn outside `render`'s reach.
     scale: f32,
 }
@@ -374,39 +361,11 @@ struct Launcher {
 impl Launcher {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (tx, rx) = channel();
-        let appearance = cx.observe_window_appearance(window, |this, window, cx| {
-            this.theme = this.settings_theme(window);
-            cx.notify();
-        });
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
                 .timer(Duration::from_millis(80))
                 .await;
             if this.update(cx, |this, cx| this.drain(cx)).is_err() {
-                break;
-            }
-        })
-        .detach();
-        // Counts the time a partner banner is on screen, until it may be hidden.
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_secs(10))
-                .await;
-            let counting = this.update(cx, |this, cx| {
-                let s = &mut this.settings;
-                if s.partner_hidden || s.partner_seen_secs >= partner::SEEN_BEFORE_HIDE {
-                    return false;
-                }
-                // On screen on every page: the card in the sidebar, the banner on Servers.
-                s.partner_seen_secs += 10;
-                if s.partner_seen_secs % 60 == 0 || s.partner_seen_secs >= partner::SEEN_BEFORE_HIDE
-                {
-                    s.save();
-                    cx.notify();
-                }
-                true
-            });
-            if !matches!(counting, Ok(true)) {
                 break;
             }
         })
@@ -438,9 +397,17 @@ impl Launcher {
         }
         // Pin the window's chrome (macOS title bar) to the choice before the theme reads
         // `window.appearance()`, so both draw the same look.
-        titlebar::apply_appearance(window, settings.appearance);
+        let palette = horizon_launcher::palette::Palette::named(&settings.palette);
+        titlebar::apply_appearance(
+            window,
+            if palette.dark {
+                backend::Appearance::Dark
+            } else {
+                backend::Appearance::Light
+            },
+        );
         let mut this = Self {
-            theme: Theme::for_appearance(settings.appearance, settings.accent, window.appearance()),
+            theme: Theme::for_palette(palette),
             page: Page::from_env(),
             switches: 0,
             content_scroll: Scrollbar::default(),
@@ -478,13 +445,10 @@ impl Launcher {
             native_mismatch: None,
             confirm_remove: None,
             picker_open: false,
-            hue_area: std::rc::Rc::new(std::cell::Cell::new(None)),
-            hue_dragging: false,
             language_menu: false,
             account_menu: false,
             menu_closed_at: None,
             skin: None,
-            background_error: None,
             args_input: line_edit::LineEdit::new(settings.game_args.clone(), 1024, 38),
             args_focused: false,
             args_focus: cx.focus_handle(),
@@ -538,7 +502,6 @@ impl Launcher {
             official_players: None,
             tx,
             rx,
-            _appearance: appearance,
             _activation: cx.observe_window_activation(window, |_, _, cx| cx.notify()),
             perf: perf::Perf::new("session"),
             install_started: None,
@@ -574,8 +537,6 @@ impl Launcher {
             shortcuts: Default::default(),
             offline_name: offline_name(),
             side_servers: horizon_launcher::servers::list(),
-            sky: sky::Sky::default(),
-            sky_wake: None,
             scale: window.scale_factor(),
         };
         this.reload_instances();
@@ -1675,7 +1636,7 @@ fn text(step: theme::Step) -> Div {
         d
     };
     if step.weight >= 500 {
-        d.font_weight(FontWeight::MEDIUM)
+        d.font_weight(FontWeight::NORMAL)
     } else {
         d
     }
@@ -1687,73 +1648,46 @@ fn version_tag(tag: &str) -> Div {
         .font_family(theme::MONO)
         .text_size(px(22.))
         .line_height(px(28.))
-        .font_weight(FontWeight::MEDIUM)
+        .font_weight(FontWeight::NORMAL)
         .child(
             horizon_launcher::nightly::label(tag)
                 .unwrap_or_else(|| tag.trim_start_matches('v').to_string()),
         )
 }
 
-/// Horizon's mark: two stems, their reflection below, and the horizon across in the accent.
 fn mark(size: f32, t: &Theme) -> Div {
-    let u = size / 16.;
-    let stem = |x: f32, y: f32, color: Hsla| {
-        div()
-            .absolute()
-            .left(px(x * u))
-            .top(px(y * u))
-            .w(px(2. * u))
-            .h(px(4. * u))
-            .bg(color)
-    };
     div()
-        .relative()
         .flex_none()
-        .size(px(size))
-        .child(stem(4., 3., t.ink))
-        .child(stem(10., 3., t.ink))
-        .child(stem(4., 8., t.ink.opacity(0.36)))
-        .child(stem(10., 8., t.ink.opacity(0.36)))
-        .child(
-            div()
-                .absolute()
-                .left(px(u))
-                .top(px(7. * u))
-                .w(px(14. * u))
-                .h(px(u))
-                .bg(t.accent),
-        )
+        .font_family(theme::MONO)
+        .text_size(px(size))
+        .line_height(px(size))
+        .text_color(t.accent)
+        .child("▌")
 }
 
 /// The last thing the player did was press Tab: focused controls show a ring (a click focuses them
 /// too, without one).
 static KEYBOARD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Makes a control reachable with Tab, pressed with Enter or Space, with a ring when the keyboard
-/// put it in focus.
+/// Makes a control reachable with Tab, pressed with Enter or Space, with a 1 px line round it
+/// when the keyboard put it in focus.
 fn keyboard(el: Stateful<Div>, t: &Theme) -> Stateful<Div> {
-    let (ring, gap) = (t.accent, t.page);
-    // A ring with a gap of page colour, so it shows around filled buttons too. GPUI draws nothing
-    // for a shadow without blur: half a pixel keeps it crisp.
-    let shadow = |color, spread: f32| gpui::BoxShadow {
-        color,
+    let ring = gpui::BoxShadow {
+        color: t.focus,
         offset: gpui::point(px(0.), px(0.)),
-        blur_radius: px(0.5),
-        spread_radius: px(spread),
+        blur_radius: px(0.),
+        spread_radius: px(1.),
         inset: false,
     };
     el.tab_index(0).focus(move |s| {
         if KEYBOARD.load(Ordering::Relaxed) {
-            s.shadow(vec![shadow(ring, 4.), shadow(gap, 1.5)])
+            s.shadow(vec![ring])
         } else {
             s
         }
     })
 }
 
-/// A button: a block with a light bevel on top and a darker lip below, its label in the pixel
-/// face. Primary (the one main action) is the violet face; Secondary a raised block; Ghost only
-/// its label until the pointer is over it.
 fn button(
     id: impl Into<SharedString>,
     label: impl Into<SharedString>,
@@ -1764,11 +1698,6 @@ fn button(
     let label: SharedString = label.into();
     let label = SharedString::from(tr(&label).to_string());
     let t = *t;
-    let hover = match kind {
-        Kind::Primary => t.on_face.opacity(0.10),
-        Kind::Secondary => t.bevel.opacity(if t.dark { 0.10 } else { 0.35 }),
-        Kind::Ghost => t.raised,
-    };
     let base = div()
         .id(id.clone())
         .relative()
@@ -1776,39 +1705,34 @@ fn button(
         .flex_none()
         .items_center()
         .justify_center()
+        .gap(px(8.))
         .h(px(theme::CONTROL))
-        .px(px(14.))
-        .font_family(theme::PIXEL)
-        .text_size(px(15.))
-        .font_weight(FontWeight::MEDIUM)
-        .cursor_pointer()
-        .child(hover_layer(&id, hover, 0., 0.));
+        .px(px(12.))
+        .font_family(theme::MONO)
+        .text_size(px(14.))
+        .font_weight(FontWeight::NORMAL)
+        .cursor_pointer();
+    let (open, close) = match kind {
+        Kind::Ghost => ("", ""),
+        _ => ("[", "]"),
+    };
     let base = match kind {
         Kind::Primary => base
-            .border_2()
-            .border_color(t.outline)
-            .children(blocks::edges(t.face_bevel, t.face_lip, theme::LIP))
             .bg(t.face)
-            .text_color(t.on_face),
+            .text_color(t.on_face)
+            .hover(move |s| s.bg(t.ink)),
         Kind::Secondary => base
-            .border_2()
-            .border_color(t.outline)
-            .children(blocks::edges(t.button_bevel, t.lip, theme::LIP))
-            .bg(t.button)
-            .text_color(t.ink),
-        Kind::Ghost => base.text_color(t.muted).hover(move |s| s.text_color(t.ink)),
+            .text_color(t.ink)
+            .hover(move |s| s.bg(t.sel_bg).text_color(t.sel_fg)),
+        Kind::Ghost => base
+            .text_color(t.muted)
+            .hover(move |s| s.text_color(t.ink).bg(t.raised)),
     };
-    // The label sits on the block's face, above its lip; pressing pushes it down.
-    let base = base.child(
-        div()
-            .relative()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .pb(px(if kind == Kind::Ghost { 0. } else { 2. }))
-            .child(label),
-    );
-    keyboard(track_hover(base, id), &t).active(|s| s.opacity(theme::PRESSED).top(px(1.)))
+    let base = base
+        .child(div().flex_none().child(open))
+        .child(label)
+        .child(div().flex_none().child(close));
+    keyboard(track_hover(base, id), &t).active(|s| s.opacity(theme::PRESSED))
 }
 
 /// Copies to the clipboard, or into `HORIZON_LAUNCHER_CLIPBOARD` when a test run sets it
@@ -1871,55 +1795,32 @@ fn sync_system_clipboard(text: String) {
     });
 }
 
-/// An on/off switch: a square knob sliding in a sunk track that turns violet when on.
 fn switch(id: impl Into<SharedString>, on: bool, t: &Theme) -> Stateful<Div> {
     let t = *t;
     let id: SharedString = id.into();
-    let knob = if on { t.on_face } else { t.muted };
-    keyboard(div().id(id.clone()), &t)
-        .relative()
+    keyboard(div().id(id), &t)
+        .flex()
         .flex_none()
-        .w(px(44.))
+        .items_center()
+        .justify_center()
         .h(px(24.))
-        .border_2()
-        .border_color(t.outline)
+        .px(px(6.))
+        .font_family(theme::MONO)
+        .text_size(px(14.))
         .cursor_pointer()
-        .bg(if on { t.face } else { t.well })
-        .child(
-            div()
-                .absolute()
-                .top(px(2.))
-                .size(px(16.))
-                .bg(knob)
-                .child(
-                    div()
-                        .absolute()
-                        .bottom_0()
-                        .left_0()
-                        .right_0()
-                        .h(px(2.))
-                        .bg(if on { t.face_lip } else { t.lip }),
-                )
-                .with_animation(
-                    ElementId::named_usize(id, on as usize),
-                    Animation::new(theme::MOVE).with_easing(ease_out_quint()),
-                    move |d, p| d.left(px(if on { 2. + 20. * p } else { 22. - 20. * p })),
-                ),
-        )
+        .border_1()
+        .border_color(if on { t.accent } else { t.outline })
+        .when(on, |d| d.bg(t.sel_bg).text_color(t.sel_fg))
+        .when(!on, |d| d.text_color(t.muted))
+        .child(if on {
+            format!("[x] {}", tr("on"))
+        } else {
+            format!("[ ] {}", tr("off"))
+        })
 }
 
-/// A section's title inside a page: a pixel icon in the accent and the name in the pixel face.
-fn section_title(label: &'static str, icon: &'static str, t: &Theme) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(10.))
-        .child(blocks::icon(icon, 20., t.accent))
-        .child(
-            blocks::pixel(18., FontWeight::SEMIBOLD)
-                .text_color(t.ink)
-                .child(tr(label)),
-        )
+fn section_title(label: &'static str, _icon: &'static str, t: &Theme) -> Div {
+    tui::rule(tr(label).to_string(), t)
 }
 
 /// A segmented control: a sunk track, the chosen segment a raised block.
@@ -1935,36 +1836,27 @@ fn segments<T: Copy + PartialEq + 'static>(
         .id(id)
         .flex()
         .flex_none()
-        .p(px(2.))
-        .gap(px(2.))
-        .border_2()
+        .border_1()
         .border_color(t.outline)
-        .bg(t.well)
+        .rounded(px(0.))
+        .overflow_hidden()
         .children(options.iter().map(|&(value, label)| {
             let active = current == value;
             let pick = on_pick.clone();
             keyboard(div().id(SharedString::from(format!("{id}-{label}"))), &t)
-                .relative()
                 .flex()
                 .items_center()
                 .h(px(theme::SEGMENT))
-                .px(px(14.))
-                .pb(px(2.))
-                .font_family(theme::PIXEL)
+                .px(px(12.))
+                .font_family(theme::MONO)
                 .text_size(px(14.))
-                .font_weight(FontWeight::MEDIUM)
                 .cursor_pointer()
-                .when(active, |d| {
-                    d.bg(t.button).text_color(t.ink).children(blocks::edges(
-                        t.button_bevel,
-                        t.lip,
-                        3.,
-                    ))
-                })
+                .when(active, |d| d.bg(t.sel_bg).text_color(t.sel_fg))
                 .when(!active, |d| {
-                    d.text_color(t.muted).hover(move |s| s.text_color(t.ink))
+                    d.text_color(t.muted)
+                        .hover(move |s| s.bg(t.raised).text_color(t.ink))
                 })
-                .child(div().relative().child(tr(label)))
+                .child(tr(label))
                 .on_click(move |_: &ClickEvent, window, cx| pick(value, window, cx))
         }))
 }
@@ -2065,20 +1957,20 @@ fn disabled(b: Stateful<Div>) -> Stateful<Div> {
     b.opacity(theme::DISABLED).cursor_default().tab_stop(false)
 }
 
-/// A page's title in the pixel face and one line on what it is for.
 fn page_header(title: &str, description: &str, t: &Theme) -> Div {
     div()
         .flex()
         .flex_col()
-        .gap(px(10.))
+        .gap(px(4.))
         .child(
-            blocks::pixel(36., FontWeight::SEMIBOLD)
+            blocks::pixel(20., FontWeight::NORMAL)
                 .text_color(t.ink)
-                .child(tr(title).to_string()),
+                .child(format!("› {}", tr(title))),
         )
         .child(
             text(theme::UI)
-                .max_w(px(520.))
+                .max_w(px(640.))
+                .pl(px(16.))
                 .text_color(t.muted)
                 .child(tr(description).to_string()),
         )
@@ -2131,7 +2023,7 @@ fn slot_row(
                 .min_w_0()
                 .gap(px(2.))
                 .child(
-                    blocks::pixel(16., FontWeight::MEDIUM)
+                    blocks::pixel(16., FontWeight::NORMAL)
                         .text_color(t.ink)
                         .child(name),
                 )
@@ -2150,38 +2042,30 @@ fn plate(t: &Theme) -> Div {
     blocks::panel(t)
 }
 
-/// Something went wrong: a dot in the danger colour, then what happened.
 fn notice(text_: String, t: &Theme) -> Div {
-    plate(t)
+    div()
+        .relative()
         .flex()
         .gap(px(12.))
-        .p(px(16.))
+        .p(px(12.))
         .text_size(px(theme::UI.px))
         .line_height(px(21.))
         .text_color(t.ink)
-        .border_l(px(6.))
-        .child(
-            div()
-                .absolute()
-                .top(px(-2.))
-                .bottom(px(-2.))
-                .left(px(-6.))
-                .w(px(6.))
-                .bg(t.danger),
-        )
-        .child(blocks::icon("info-box", 20., t.danger))
+        .border_1()
+        .border_color(t.danger)
+        .rounded(px(0.))
+        .child(blocks::icon("info-box", 16., t.danger))
         .child(div().flex_1().min_w_0().child(text_))
 }
 
-/// An empty state: a short sentence, and the one thing to do about it.
 fn centered(text_: &str, t: &Theme) -> Div {
     div()
         .flex()
         .flex_col()
         .items_start()
         .gap(px(16.))
-        .py(px(48.))
-        .child(text(theme::UI).text_color(t.muted).child(text_.to_string()))
+        .py(px(16.))
+        .child(tui::hatched(text_.to_string(), t))
 }
 
 /// The name the game made up for a player without an account, once it has run.
@@ -2232,18 +2116,15 @@ fn megabytes(bytes: u64) -> String {
 // ----- Pages -------------------------------------------------------------------------------------
 
 impl Launcher {
-    /// The top bar: the mark and name over the sidebar (in the title bar on Windows and Linux
-    /// client-side decorations), the pages with their icons, then the account and Settings.
-    /// The top bar over the pages: their tabs, then the account chip and Settings. No plate: the
-    /// sky shows through, under a 1 px rule.
     fn topbar(&mut self, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
-        let n = t.night;
-        let mut nav = div().flex().flex_none().items_center().gap(px(4.));
+        let mut nav = div()
+            .flex()
+            .min_w_0()
+            .overflow_hidden()
+            .items_center()
+            .gap(px(4.));
         for (page, label, _) in Page::ALL {
-            if page == Page::Settings {
-                continue;
-            }
             nav = nav.child(
                 shell::tab(format!("nav-{label}"), tr(label), self.page == page, &t).on_click(
                     cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -2253,49 +2134,21 @@ impl Launcher {
                 ),
             );
         }
-        // Only a signed-in account says "Microsoft account"; otherwise an offline name, or the
-        // one the game made up. A signed-in one shows its face (its skin, else its UUID's default).
         let (name, how) = self.who_plays();
-        let face = match self.accounts.player() {
-            account::Player::Microsoft(_) => self.accounts.selected().map(|a| a.uuid.clone()),
-            _ => None,
-        };
-        let picture = match face {
-            Some(uuid) => (self.profile_heads)
-                .draw(Some(&uuid), 28., self.scale, &t)
-                .into_any_element(),
-            None => div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(28.))
-                .bg(plate::alpha(n.card_hi, n.card_hi_alpha))
-                .child(blocks::icon("user", 16., shell::c(n.muted)))
-                .into_any_element(),
-        };
         let account = shell::chip("account", &t)
-            .max_w(px(200.))
-            .child(div().relative().child(picture))
+            .max_w(px(180.))
+            .child(div().relative().flex_none().text_color(t.accent).child("●"))
             .child(
-                div()
+                shell::text(theme::night::UI, t.ink)
                     .relative()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .child(
-                        shell::text(theme::night::UI, shell::c(n.ink))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .line_height(px(16.))
-                            .truncate()
-                            .child(name),
-                    )
-                    .child(
-                        shell::text(theme::night::CAPTION, shell::c(n.muted))
-                            .truncate()
-                            .child(how),
-                    ),
+                    .truncate()
+                    .child(name),
+            )
+            .child(
+                shell::text(theme::night::CAPTION, t.muted)
+                    .relative()
+                    .truncate()
+                    .child(how),
             )
             .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
                 if this.closed_by_this_press(event) {
@@ -2303,7 +2156,6 @@ impl Launcher {
                 }
                 this.account_menu = !this.account_menu;
                 if this.account_menu {
-                    // Who can play may have changed elsewhere since the window opened.
                     this.accounts = Accounts::load();
                     this.load_profile_heads();
                 }
@@ -2313,42 +2165,31 @@ impl Launcher {
             .relative()
             .child(account)
             .children(self.account_menu(cx));
-        let settings = shell::icon_button(
-            "nav-Settings",
-            "sliders",
-            40.,
-            self.page == Page::Settings,
-            &t,
-        )
-        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-            this.go(Page::Settings);
-            cx.notify();
-        }));
         div()
             .flex()
             .flex_none()
             .items_center()
+            .gap(px(24.))
             .h(px(theme::TOPBAR))
-            .pl(px(theme::PAGE_GUTTER - 14.))
-            .pr(px(12.))
+            .px(px(theme::PAGE_GUTTER - 8.))
             .border_b_1()
-            .border_color(plate::alpha(n.stroke, n.rule_alpha))
-            .child(nav)
+            .border_color(t.outline)
             .child(
                 div()
-                    .ml_auto()
-                    .flex()
                     .flex_none()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(account)
-                    .child(settings),
+                    .font_family(theme::MONO)
+                    .text_size(px(14.))
+                    .font_weight(FontWeight::NORMAL)
+                    .text_color(t.ink)
+                    .child(tui::WORDMARK),
             )
+            .child(nav)
+            .child(div().ml_auto().flex().min_w_0().child(account))
     }
 
     /// The sidebar, from the top of the window: the wordmark, Horizon and the imported modpacks,
     /// the player's servers, then the launcher's own update, the community links and its version.
-    fn sidebar(&mut self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn sidebar(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = self.theme;
         let n = t.night;
         self.load_packs();
@@ -2360,45 +2201,33 @@ impl Launcher {
             },
         ));
         let items = self.instance_items(heading, cx);
-        let mut rows = items.len();
-        let list = div()
-            .flex()
-            .flex_col()
+        let list = tui::panel(tr("INSTANCES").to_string(), false, t.side, &t)
+            .mt(px(10.))
             .gap(px(2.))
-            .child(heading(tr("INSTANCES").into()).child(add))
-            .children(items);
+            .py(px(10.))
+            .children(items)
+            .child(div().flex().px(px(8.)).pt(px(4.)).child(add));
         let servers: Vec<_> = self
             .servers
             .sidebar_list()
             .map(<[_]>::to_vec)
             .unwrap_or_else(|| self.side_servers.clone());
-        let mut list = list;
-        if !servers.is_empty() {
-            list = list.child(heading(tr("SERVERS").into()));
-        }
-        rows += servers.len();
+        let mut list = div().flex().flex_col().gap(px(14.)).child(list);
         let headings = 1 + usize::from(!servers.is_empty());
+        let mut server_rows = tui::panel(tr("SERVERS").to_string(), false, t.side, &t)
+            .gap(px(2.))
+            .py(px(10.));
         for e in servers {
             let up = self.servers.is_up(&e.dir);
             let open = self.page == Page::Servers && self.servers.open.as_ref() == Some(&e.dir);
             let dir = e.dir.clone();
-            list = list.child(
+            server_rows = server_rows.child(
                 shell::row(format!("side-server-{}", e.dir.display()), open, &t)
-                    .child(
-                        div()
-                            .relative()
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .justify_center()
-                            .size(px(36.))
-                            .bg(plate::alpha(n.card_hi, n.card_hi_alpha))
-                            .child(blocks::icon("server", 18., shell::c(n.ink_soft))),
-                    )
                     .child(shell::row_text(
                         e.name.clone(),
                         tr(if up { "Running" } else { "Stopped" }).into(),
-                        Some(shell::c(if up { n.success } else { n.muted })),
+                        Some(if up { t.success } else { t.muted }),
+                        open,
                         &t,
                     ))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -2407,6 +2236,9 @@ impl Launcher {
                         cx.notify();
                     })),
             );
+        }
+        if headings > 1 {
+            list = list.child(server_rows);
         }
         let link = |id: &'static str, label: &'static str, icon: &'static str, url: String| {
             let id = SharedString::from(id);
@@ -2420,17 +2252,9 @@ impl Launcher {
                     .h(px(32.))
                     .px(px(8.))
                     .cursor_pointer()
-                    .child(hover_layer(&id, shell::c(n.card_hi).opacity(0.5), 0., 0.))
-                    .child(
-                        div()
-                            .relative()
-                            .child(blocks::icon(icon, 16., shell::c(n.muted))),
-                    )
-                    .child(
-                        shell::text(theme::night::UI, shell::c(n.ink_soft))
-                            .relative()
-                            .child(label),
-                    )
+                    .child(hover_layer(&id, t.raised, 0., 0.))
+                    .child(div().relative().child(blocks::icon(icon, 16., t.muted)))
+                    .child(shell::text(theme::night::UI, t.ink).relative().child(label))
                     .on_click(move |_, _, cx| cx.open_url(&url)),
                 id,
             )
@@ -2485,60 +2309,16 @@ impl Launcher {
             }
             _ => {}
         }
-        // Sculk's card above the links: seen without scrolling, on every page but Servers, which shows
-        // its wide banner. Tall where the sidebar has the height for it besides the wordmark, its rows
-        // (52 high each, under headings of 40) and the links, compact otherwise. After a while on
-        // screen a "Hide" beside its label puts it away for good.
-        if self.page != Page::Servers && !self.settings.partner_hidden {
-            let free = f32::from(window.viewport_size().height)
-                - theme::TOPBAR
-                - 40. * headings as f32
-                - 52. * rows as f32
-                - 110.;
-            let mut side = div().relative().mb(px(8.)).child(partner::card(
-                "partner-side",
-                theme::SIDEBAR - 20.,
-                free < partner::TALL_HEIGHT,
-                &t,
-            ));
-            if self.settings.partner_seen_secs >= partner::SEEN_BEFORE_HIDE {
-                let hide = partner::hide_button("partner-hide", &t).on_click(cx.listener(
-                    |this, _: &ClickEvent, _, cx| {
-                        this.settings.partner_hidden = true;
-                        this.settings.save();
-                        cx.notify();
-                    },
-                ));
-                side = side.child(hide);
-            }
-            foot = foot.child(side);
-        }
-        if !self.links.sponsor.is_empty() {
-            foot = foot.child(link(
-                "sponsor",
-                tr("Sponsor"),
-                "heart",
-                self.links.sponsor.clone(),
-            ));
-        }
-        if !self.links.discord.is_empty() {
-            foot = foot.child(link(
-                "discord",
-                "Discord",
-                "message",
-                self.links.discord.clone(),
-            ));
-        }
         if !self.links.website.is_empty() {
             foot = foot.child(link(
                 "website",
-                tr("Website"),
+                "GitHub",
                 "globe",
                 self.links.website.clone(),
             ));
         }
         foot = foot.child(
-            shell::text(theme::night::CAPTION, shell::c(n.muted))
+            shell::text(theme::night::CAPTION, t.muted)
                 .id("launcher-version")
                 .px(px(8.))
                 .pt(px(6.))
@@ -2548,22 +2328,6 @@ impl Launcher {
                     cx.notify();
                 })),
         );
-        // Custom title bars carry the mark and name already.
-        let brand = (!titlebar::draws_brand(window)).then(|| {
-            div()
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap(px(10.))
-                .h(px(theme::TOPBAR))
-                .px(px(8.))
-                .child(mark(24., &t))
-                .child(
-                    shell::text(theme::night::TITLE, shell::c(n.ink))
-                        .font_family(theme::DISPLAY_FONT)
-                        .child("Horizon"),
-                )
-        });
         shell::sidebar_plate(&t)
             .id("sidebar")
             .flex()
@@ -2574,7 +2338,6 @@ impl Launcher {
             .px(px(10.))
             .pb(px(12.))
             .overflow_y_scroll()
-            .children(brand)
             .child(list)
             .child(foot)
     }
@@ -2616,7 +2379,7 @@ impl Launcher {
                         .gap(px(2.))
                         .child(
                             shell::text(theme::night::CAPTION, t.muted)
-                                .font_weight(FontWeight::SEMIBOLD)
+                                .font_weight(FontWeight::NORMAL)
                                 .child(tr("Version").to_string()),
                         )
                         .child(shell::text(theme::night::UI, t.ink).child(label)),
@@ -2677,9 +2440,7 @@ impl Launcher {
                                 .when(latest, |d| {
                                     d.child(caps(tr("follows updates")).text_color(t.muted))
                                 })
-                                .when(selected, |d| {
-                                    d.child(div().size(px(6.)).rounded_full().bg(t.accent))
-                                }),
+                                .when(selected, |d| d.child(div().size(px(6.)).bg(t.accent))),
                         )
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             this.pin_version((!latest).then(|| tag.clone()));
@@ -2950,46 +2711,12 @@ impl Launcher {
             }
         }
 
-        // The banner: the hero and the Play row over the sky (`sky.rs`), or over the player's
-        // own picture under a veil of the page colour. It reaches the content's edges and the top
-        // bar.
-        let veil = |angle: f32, from: f32, to: f32, at: f32| {
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .bg(gpui::linear_gradient(
-                    angle,
-                    gpui::linear_color_stop(t.page.opacity(from), 0.),
-                    gpui::linear_color_stop(t.page.opacity(to), at),
-                ))
-        };
-        let picture = self.home_background().map(|path| {
-            [
-                gpui::img(path)
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full()
-                    .object_fit(gpui::ObjectFit::Cover)
-                    .into_any_element(),
-                veil(90., 0.82, 0., 0.62).into_any_element(),
-                veil(180., 0., 0.75, 1.).into_any_element(),
-            ]
-        });
-        let banner = div()
-            .relative()
-            .flex()
-            .flex_col()
+        let banner = tui::panel(tr("Play").to_string(), true, t.page, &t)
             .justify_end()
-            .min_h(px(340.))
-            .mx(px(-theme::PAGE_GUTTER))
-            .px(px(theme::PAGE_GUTTER))
-            .pb(px(28.))
+            .min_h(px(240.))
+            .px(px(20.))
+            .py(px(24.))
             .gap(px(24.))
-            .overflow_hidden()
-            .children(picture.into_iter().flatten())
             .child(
                 div()
                     .relative()
@@ -3072,12 +2799,12 @@ impl Launcher {
                     cx.open_with_system(&dir);
                 }),
         );
-        let discord = self.links.discord.clone();
-        if !discord.is_empty() {
+        let issues = format!("{}/issues", self.links.website.trim_end_matches('/'));
+        if !self.links.website.is_empty() {
             actions = actions.child(
-                button("crash-discord", "Report on Discord", Kind::Secondary, &t)
+                button("crash-report", "Report on GitHub", Kind::Secondary, &t)
                     .bg(t.plate)
-                    .on_click(move |_, _, cx| cx.open_url(&discord)),
+                    .on_click(move |_, _, cx| cx.open_url(&issues)),
             );
         }
         actions = actions.child(
@@ -3128,14 +2855,7 @@ impl Launcher {
             .text_size(px(theme::UI.px))
             .line_height(px(21.))
             .text_color(t.ink)
-            .child(
-                div()
-                    .flex_none()
-                    .mt(px(11.))
-                    .size(px(6.))
-                    .rounded_full()
-                    .bg(t.danger),
-            )
+            .child(div().flex_none().mt(px(11.)).size(px(6.)).bg(t.danger))
             .child(body)
     }
 
@@ -3257,28 +2977,6 @@ impl Launcher {
         let plain = |s: &str| div().child(tr(s).to_string()).into_any_element();
         let (accounts, n) = self.account_rows(cx);
         let (offline, n) = self.offline_rows(n, cx);
-        let appearance = segments(
-            "appearance",
-            &[
-                (backend::Appearance::Dark, "Dark"),
-                (backend::Appearance::Light, "Light"),
-                (backend::Appearance::System, "System"),
-            ],
-            self.settings.appearance,
-            &t,
-            {
-                let this = cx.entity().downgrade();
-                move |choice, window, cx| {
-                    let _ = this.update(cx, |this, cx| {
-                        this.settings.appearance = choice;
-                        this.settings.save();
-                        titlebar::apply_appearance(window, choice);
-                        this.theme = this.settings_theme(window);
-                        cx.notify();
-                    });
-                }
-            },
-        );
         let group = |label: &'static str, icon: &'static str| {
             section_title(label, icon, &t).mt(px(20.)).mb(px(12.))
         };
@@ -3323,15 +3021,7 @@ impl Launcher {
                         &t,
                     ))
                     .child(group("Launcher", "monitor"))
-                    .child(index_row(
-                        n + 3,
-                        tr("Appearance"),
-                        Some(plain("Dark by default. System follows your computer's light or dark.")),
-                        Some(appearance.into_any_element()),
-                        &t,
-                    ))
-                    .child(self.accent_row(cx))
-                    .child(self.home_background_row(cx))
+                    .child(self.palette_row(cx))
                     .child(self.language_row(cx))
                     .child(self.while_playing_row(n + 3, cx))
                     .child(index_row(
@@ -3512,7 +3202,7 @@ impl Launcher {
             .h(px(30.))
             .px(px(12.))
             .overflow_hidden()
-            .border_2()
+            .border_1()
             .border_color(if focused { t.accent } else { t.outline })
             .bg(t.well)
             .font_family(theme::MONO)
@@ -3571,7 +3261,7 @@ impl Launcher {
             .h(px(30.))
             .px(px(12.))
             .overflow_hidden()
-            .border_2()
+            .border_1()
             .border_color(if focused { t.accent } else { t.outline })
             .bg(t.well)
             .font_family(theme::MONO)
@@ -4118,9 +3808,9 @@ impl Launcher {
                     .px(px(16.))
                     .mb(px(8.))
                     .bg(t.panel)
-                    .border_2()
+                    .border_1()
                     .border_color(t.outline)
-                    .children(blocks::edges(t.bevel, t.lip, theme::BEVEL))
+                    .rounded(px(0.))
                     .child(hover_layer(&id, t.raised, 0., 0.))
                     .child(
                         div()
@@ -4169,67 +3859,27 @@ impl Launcher {
         page.child(list)
     }
 
-    fn notes_page(&mut self, cx: &mut Context<Self>) -> Div {
+    fn notes_page(&mut self) -> Div {
         let t = self.theme;
-        let sponsor = (!self.links.sponsor.is_empty()).then(|| {
-            plate(&t)
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(16.))
-                .p(px(24.))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.))
-                        .child(
-                            text(theme::HEADING)
-                                .text_color(t.ink)
-                                .child(tr("Support the work below")),
-                        )
-                        .child(text(theme::UI).text_color(t.muted).child(tr(
-                            "Horizon is built in the open. Sponsors fund the next release.",
-                        ))),
-                )
-                .child(
-                    button("sponsor", "Sponsor on GitHub", Kind::Secondary, &t)
-                        .bg(t.plate)
-                        .on_click({
-                            let url = self.links.sponsor.clone();
-                            move |_: &ClickEvent, _, cx| cx.open_url(&url)
-                        }),
-                )
-        });
-        let page = div()
-            .flex()
-            .flex_col()
-            .gap(px(32.))
-            .child(page_header(
-                "Patch notes",
-                "What changed in each release, newest first.",
-                &t,
-            ))
-            .children(sponsor);
+        let page = div().flex().flex_col().gap(px(32.)).child(page_header(
+            "Patch notes",
+            "What changed in each release, newest first.",
+            &t,
+        ));
         let releases = match &self.releases {
             Load::Loading => return page.child(centered(tr("Loading patch notes…"), &t)),
-            Load::Failed(e) => {
+            Load::Ready(r) if !r.is_empty() => r,
+            Load::Failed(_) | Load::Ready(_) => {
                 return page.child(
-                    centered(
-                        &trf("Couldn't load patch notes. {error}", &[("error", e)]),
-                        &t,
-                    )
-                    .child(
-                        button("retry-notes", "Try again", Kind::Secondary, &t).on_click(
-                            cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.fetch_releases();
-                                cx.notify();
-                            }),
-                        ),
-                    ),
+                    div()
+                        .max_w(px(640.))
+                        .p(px(20.))
+                        .bg(t.panel)
+                        .border_1()
+                        .border_color(t.outline)
+                        .child(markdown::render(PATCH_NOTES, &t)),
                 )
             }
-            Load::Ready(r) => r,
         };
         let list = self.long_list.clone().column(
             &self.content_scroll.handle,
@@ -4251,9 +3901,9 @@ impl Launcher {
                     .p(px(20.))
                     .mb(px(10.))
                     .bg(t.panel)
-                    .border_2()
+                    .border_1()
                     .border_color(t.outline)
-                    .children(blocks::edges(t.bevel, t.lip, theme::BEVEL))
+                    .rounded(px(0.))
                     .child(
                         div()
                             .flex()
@@ -4291,55 +3941,42 @@ impl Launcher {
     }
 }
 
-/// A thin bar. A known fraction eases from its previous value; an unknown one shuttles slowly.
-/// Progress: a plate-coloured track filling with the accent; work of unknown length shuttles.
+const PATCH_NOTES: &str = include_str!("../../docs/perforizon-patchnotes.md");
+
 fn progress_bar(fraction: Option<(f32, f32)>, t: &Theme) -> Div {
-    // Night: a thin accent line on a plate's colour, square like the art.
-    let n = t.night;
-    let bar = div()
-        .absolute()
-        .top_0()
-        .bottom_0()
-        .bg(plate::alpha(n.accent, 1.));
     let track = div()
-        .relative()
         .flex_1()
-        .h(px(6.))
-        .bg(plate::alpha(n.card_hi, n.card_hi_alpha))
-        .overflow_hidden();
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .font_family(theme::MONO)
+        .text_size(px(14.))
+        .line_height(px(20.))
+        .text_color(t.accent);
     match fraction {
-        Some((from, to)) => {
-            let (from, to) = (from.clamp(0.02, 1.), to.clamp(0.02, 1.));
-            track.child(bar.left_0().with_animation(
-                ElementId::named_usize("bar", (to * 1000.) as usize),
-                Animation::new(theme::MOVE).with_easing(ease_out_quint()),
-                move |d, p| d.w(relative(from + (to - from) * p)),
-            ))
-        }
-        None => track.child(
-            bar.w(relative(0.3)).with_animation(
-                "shuttle",
-                Animation::new(Duration::from_millis(1600))
-                    .repeat()
-                    .with_easing(gpui::ease_in_out),
-                |d, p| d.left(relative(-0.3 + 1.3 * p)),
-            ),
-        ),
+        Some((from, to)) => track.child(div().with_animation(
+            ElementId::named_usize("bar", (to * 1000.) as usize),
+            Animation::new(theme::MOVE).with_easing(ease_out_quint()),
+            move |d, p| {
+                let now = from + (to - from) * p;
+                d.child(format!(
+                    "{:>3.0}% {}",
+                    now.clamp(0., 1.) * 100.,
+                    tui::block_bar(now, tui::BAR_CELLS)
+                ))
+            },
+        )),
+        None => track.child(div().with_animation(
+            "shuttle",
+            Animation::new(Duration::from_millis(1600)).repeat(),
+            |d, p| d.child(tui::shuttle_bar(p, tui::BAR_CELLS, 6)),
+        )),
     }
 }
 
 impl Render for Launcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
-        if specimen::wanted() {
-            return div()
-                .flex()
-                .flex_col()
-                .size_full()
-                .bg(t.side)
-                .children(titlebar::render(&t, window))
-                .child(specimen::render(&t));
-        }
         self.scale = window.scale_factor();
         self.perf.frame();
         if self.bench.as_ref().is_some_and(perf::Bench::scrolling) {
@@ -4351,16 +3988,14 @@ impl Render for Launcher {
         self.github.note_focus(window);
         self.args_focused = self.args_focus.is_focused(window);
         self.proxy_focused = self.proxy_focus.is_focused(window);
-        let size = window.viewport_size();
         let content = match self.page {
             Page::Play => self.play_page(cx),
             Page::Versions => self.versions_page(cx),
             Page::Mods => self.mods_page(cx),
             Page::Servers => self.servers_page(cx),
-            Page::Notes => self.notes_page(cx),
+            Page::Notes => self.notes_page(),
             Page::Settings => self.settings_page(cx),
         };
-        self.sky.free_replaced(window);
         // The new page fades in and rises a few pixels.
         let content = div()
             .relative()
@@ -4378,18 +4013,8 @@ impl Render for Launcher {
         if self.opening.is_none() && window.focused(cx).is_none() {
             window.focus(&self.root_focus, cx);
         }
-        let (sky, next) = self.sky.render(
-            &t.night,
-            (size.width.into(), size.height.into()),
-            window.scale_factor(),
-            window.is_window_active(),
-            Instant::now(),
-        );
-        if let Some(next) = next {
-            self.wake_sky(next, cx);
-        }
         let topbar = self.topbar(cx);
-        let sidebar = self.sidebar(window, cx);
+        let sidebar = self.sidebar(cx);
         let mut root = div()
             .id("root")
             .track_focus(&self.root_focus)
@@ -4414,6 +4039,12 @@ impl Render for Launcher {
                 cx.stop_propagation();
                 cx.notify();
             }))
+            .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                if ev.keystroke.modifiers.control && ev.keystroke.key.as_str() == "p" {
+                    this.cycle_palette(window);
+                    cx.notify();
+                }
+            }))
             .capture_any_mouse_down(|_, _, _| KEYBOARD.store(false, Ordering::Relaxed))
             .relative()
             .flex()
@@ -4426,46 +4057,39 @@ impl Render for Launcher {
                 div()
                     .relative()
                     .flex()
+                    .flex_col()
                     .size_full()
                     .opacity(ui)
                     .top(px(theme::RISE * (1. - ui)))
-                    .child(sidebar)
+                    .child(topbar)
                     .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w_0()
-                            .child(topbar)
-                            .child(
-                                self.content_scroll
-                                    .wrap(
-                                        div()
-                                            .id("content")
-                                            .relative()
-                                            .flex_1()
-                                            .min_h_0()
-                                            .overflow_y_scroll()
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .w_full()
-                                                    .min_w_0()
-                                                    .px(px(theme::PAGE_GUTTER))
-                                                    .pt(px(if self.page == Page::Play {
-                                                        0.
-                                                    } else {
-                                                        28.
-                                                    }))
-                                                    .pb(px(48.))
-                                                    .child(content),
-                                            ),
-                                        &t,
-                                    )
-                                    .flex_1()
-                                    .min_h_0(),
-                            ),
-                    ),
+                        div().flex().flex_1().min_h_0().child(sidebar).child(
+                            self.content_scroll
+                                .wrap(
+                                    div()
+                                        .id("content")
+                                        .relative()
+                                        .flex_1()
+                                        .min_h_0()
+                                        .overflow_y_scroll()
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .w_full()
+                                                .min_w_0()
+                                                .px(px(theme::PAGE_GUTTER))
+                                                .pt(px(20.))
+                                                .pb(px(32.))
+                                                .child(content),
+                                        ),
+                                    &t,
+                                )
+                                .flex_1()
+                                .min_w_0()
+                                .min_h_0(),
+                        ),
+                    )
+                    .child(tui::footer(None, &t)),
             );
         if self.page == Page::Servers {
             if let Some(dialog) = self.create_dialog(cx) {
@@ -4495,12 +4119,16 @@ impl Render for Launcher {
             let word = div()
                 .flex()
                 .font_family(theme::PIXEL)
-                .text_size(px(theme::WORDMARK.px * 0.5))
-                .line_height(px(theme::WORDMARK.px * 0.5))
-                .font_weight(FontWeight::BOLD)
+                .whitespace_nowrap()
+                .text_size(px(28.))
+                .line_height(px(36.))
+                .font_weight(FontWeight::NORMAL)
                 .text_color(t.ink)
-                .children("HORIZON".chars().enumerate().map(|(i, c)| {
-                    let at = held - i as f32 * theme::STAGGER.as_secs_f32() * 1.5;
+                .children(tui::WORDMARK.chars().enumerate().map(|(i, c)| {
+                    if c == ' ' {
+                        return div().w(px(16.8));
+                    }
+                    let at = held - (i / 2) as f32 * theme::STAGGER.as_secs_f32() * 1.5;
                     let p = ease_out_cubic(at / theme::ENTER.as_secs_f32());
                     div()
                         .relative()
@@ -4548,7 +4176,6 @@ impl Render for Launcher {
             .relative()
             .size_full()
             .bg(t.side)
-            .child(sky)
             .children(titlebar::render(&t, window))
             .child(root.flex_1().min_h_0())
             .children(titlebar::resize_handles(window))
@@ -4589,22 +4216,6 @@ impl Launcher {
         }
         handle.set_offset(offset);
         window.request_animation_frame();
-    }
-
-    /// Draws the window again in `after`, when the sky next changes, unless a frame comes sooner.
-    fn wake_sky(&mut self, after: Duration, cx: &mut Context<Self>) {
-        let at = Instant::now() + after;
-        if self.sky_wake.as_ref().is_some_and(|(when, _)| *when <= at) {
-            return;
-        }
-        let timer = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(after).await;
-            let _ = this.update(cx, |this, cx| {
-                this.sky_wake = None;
-                cx.notify();
-            });
-        });
-        self.sky_wake = Some((at, timer));
     }
 
     fn skip_opening(&mut self) {
@@ -4674,14 +4285,7 @@ fn main() {
         .with_assets(blocks::Assets)
         .run(|cx: &mut App| {
             cx.text_system()
-                .add_fonts(vec![
-                    Cow::Borrowed(horizon_theme::fonts::GEIST_MONO),
-                    Cow::Borrowed(horizon_theme::fonts::BRICOLAGE_REGULAR),
-                    Cow::Borrowed(horizon_theme::fonts::BRICOLAGE_MEDIUM),
-                    Cow::Borrowed(horizon_theme::fonts::BRICOLAGE_SEMIBOLD),
-                    Cow::Borrowed(horizon_theme::fonts::BRICOLAGE_BOLD),
-                    Cow::Borrowed(horizon_theme::fonts::BRICOLAGE_DISPLAY_BOLD),
-                ])
+                .add_fonts(vec![Cow::Borrowed(horizon_theme::fonts::GEIST_MONO)])
                 .expect("bundled fonts");
             cx.bind_keys(key_bindings());
             cx.on_action(|_: &Quit, cx| shut_down(cx));
@@ -4695,11 +4299,11 @@ fn main() {
                 })
             });
             cx.set_menus(menus());
-            let bounds = Bounds::centered(None, size(px(1180.), px(760.)), cx);
+            let bounds = Bounds::centered(None, size(px(1100.), px(700.)), cx);
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(960.), px(600.))),
+                    window_min_size: Some(size(px(1100.), px(600.))),
                     titlebar: Some(titlebar::options()),
                     #[cfg(target_os = "linux")]
                     window_decorations: Some(gpui::WindowDecorations::Client),

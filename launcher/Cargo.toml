@@ -85,6 +85,8 @@ winresource = "0.1"
 # Tokenize source strings for the translation completeness test, including multiline calls.
 proc-macro2 = "1"
 syn = "2"
+# Checks the glyphs the terminal look draws against the bundled font.
+ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
 
 [profile.release]
 strip = true

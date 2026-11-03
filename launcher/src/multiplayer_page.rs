@@ -156,7 +156,7 @@ impl Launcher {
             .items_center()
             .justify_center()
             .size(px(48.))
-            .border_2()
+            .border_1()
             .border_color(t.outline)
             .bg(t.well);
         let picture = match icon {
@@ -243,7 +243,7 @@ impl Launcher {
                     .flex_1()
                     .min_w_0()
                     .child(
-                        blocks::pixel(15., FontWeight::MEDIUM)
+                        blocks::pixel(15., FontWeight::NORMAL)
                             .text_color(t.ink)
                             .truncate()
                             .child(server.name.clone()),

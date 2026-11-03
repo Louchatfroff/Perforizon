@@ -1058,7 +1058,7 @@ impl Launcher {
             .flex()
             .flex_col()
             .size(px(size))
-            .rounded(px(3.))
+            .rounded(px(0.))
             .overflow_hidden()
             .bg(self.theme.plate);
         if let Some(pixels) = face {
@@ -1160,34 +1160,12 @@ impl Launcher {
         {
             page = page.child(self.problem_notice(p, cx));
         }
-        // The banner, with a "Hide" once it has been on screen a while: hiding it hides the
-        // sidebar's card too, for good. Nothing at all once hidden.
-        let partner = (!self.settings.partner_hidden).then(|| {
-            let mut slot = div().relative().w(px(600.)).child(super::partner::banner(
-                "partner-servers",
-                600.,
-                &t,
-            ));
-            if self.settings.partner_seen_secs >= super::partner::SEEN_BEFORE_HIDE {
-                slot = slot.child(
-                    super::partner::hide_button("partner-servers-hide", &t).on_click(cx.listener(
-                        |this, _: &ClickEvent, _, cx| {
-                            this.settings.partner_hidden = true;
-                            this.settings.save();
-                            cx.notify();
-                        },
-                    )),
-                );
-            }
-            slot
-        });
         if self.servers.list.is_empty() {
             return page
                 .child(centered(
                     tr("No server yet. Create one: it takes a few seconds, and with the defaults (tick the EULA, press Create) you get a friends-only survival world."),
                     &t,
-                ))
-                .children(partner);
+                ));
         }
         let mut list = div().flex().flex_col().border_t_1().border_color(t.rule);
         for (i, e) in self.servers.list.clone().into_iter().enumerate() {
@@ -1233,7 +1211,7 @@ impl Launcher {
                 &t,
             ));
         }
-        page.child(list).children(partner)
+        page.child(list)
     }
 
     fn add_server_folder(&mut self, cx: &mut Context<Self>) {
@@ -1357,7 +1335,7 @@ impl Launcher {
                     .flex()
                     .items_center()
                     .gap(px(10.))
-                    .child(div().size(px(8.)).rounded_full().bg(dot))
+                    .child(div().size(px(8.)).bg(dot))
                     .child(caps(phase_label(&status)).text_color(t.muted))
                     .when_some(status.uptime.filter(|_| running), |d, up| {
                         d.child(caps(format!("· up {}", uptime(up))).text_color(t.muted))
@@ -1478,7 +1456,7 @@ impl Launcher {
                     .items_center()
                     .gap(px(12.))
                     .p(px(16.))
-                    .child(div().flex_none().size(px(6.)).rounded_full().bg(t.success))
+                    .child(div().flex_none().size(px(6.)).bg(t.success))
                     .child(
                         div()
                             .flex_1()
@@ -1501,7 +1479,7 @@ impl Launcher {
                     .items_center()
                     .gap(px(12.))
                     .p(px(16.))
-                    .child(div().flex_none().size(px(6.)).rounded_full().bg(t.accent))
+                    .child(div().flex_none().size(px(6.)).bg(t.accent))
                     .child(
                         div()
                             .flex_1()
@@ -2368,7 +2346,7 @@ impl Launcher {
                     gpui::StyledText::new(format!("Type {name} to confirm.")).with_highlights([(
                         5..5 + name.len(),
                         gpui::HighlightStyle {
-                            font_weight: Some(FontWeight::BOLD),
+                            font_weight: Some(FontWeight::NORMAL),
                             ..Default::default()
                         },
                     )]),
@@ -2780,7 +2758,6 @@ impl Launcher {
                         .child(
                             div()
                                 .size(px(12.))
-                                .rounded_full()
                                 .border_1()
                                 .border_color(if chosen { t.accent } else { t.muted })
                                 .when(chosen, |d| d.bg(t.accent)),
@@ -2854,7 +2831,7 @@ impl Launcher {
                 .id(id)
                 .flex_none()
                 .size(px(18.))
-                .rounded(px(4.))
+                .rounded(px(0.))
                 .border_1()
                 .border_color(if on { t.accent } else { t.muted })
                 .bg(if on { t.accent } else { t.surface })
@@ -2864,7 +2841,7 @@ impl Launcher {
                 .text_color(t.on_accent)
                 .text_size(px(12.))
                 .cursor_pointer()
-                .when(on, |d| d.child("✓"))
+                .when(on, |d| d.child("√"))
         };
         let eula_line = div()
             .flex()

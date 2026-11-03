@@ -76,7 +76,7 @@ impl Launcher {
             .right_0()
             .w(px(280.))
             .p(px(6.))
-            .border_2()
+            .border_1()
             .border_color(t.outline)
             .bg(t.surface)
             .flex()
@@ -119,9 +119,7 @@ impl Launcher {
                             .child(text(theme::LABEL).truncate().text_color(t.ink).child(name))
                             .child(text(theme::CAPTION).text_color(t.muted).child(how)),
                     )
-                    .when(chosen, |d| {
-                        d.child(div().size(px(6.)).rounded_full().bg(t.accent))
-                    })
+                    .when(chosen, |d| d.child(div().size(px(6.)).bg(t.accent)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.play_as(who.clone());
                         cx.notify();

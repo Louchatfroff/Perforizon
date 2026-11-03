@@ -193,7 +193,7 @@ impl Launcher {
             Some(icon) => div()
                 .flex_none()
                 .size(px(48.))
-                .border_2()
+                .border_1()
                 .border_color(t.outline)
                 .child(gpui::img(icon.clone()).size(px(44.)))
                 .into_any_element(),
@@ -203,7 +203,7 @@ impl Launcher {
                 .items_center()
                 .justify_center()
                 .size(px(48.))
-                .border_2()
+                .border_1()
                 .border_color(t.outline)
                 .bg(t.well)
                 .child(blocks::icon("image", 22., t.muted))
@@ -323,7 +323,7 @@ impl Launcher {
                     .flex_1()
                     .min_w_0()
                     .child(
-                        blocks::pixel(15., FontWeight::MEDIUM)
+                        blocks::pixel(15., FontWeight::NORMAL)
                             .text_color(t.ink)
                             .truncate()
                             .child(w.name.clone()),

@@ -794,7 +794,7 @@ enum Cmd {
     },
     /// Show a release's patch notes (default: the newest)
     Notes { tag: Option<String> },
-    /// Show the Discord, sponsor and website links
+    /// Show the project link
     Links,
     /// Microsoft accounts: list them (the default), sign in, sign out, or pick the one that plays
     Account {
@@ -807,9 +807,10 @@ enum Cmd {
     /// selected one, the ones instances use and the newest few), keep-versions N (how many of the
     /// newest to keep; "default" is 2), opening-animation on|off, proxy http://host:port
     /// ("default" removes it), while-playing stay|minimize|hide (what the window does while the game runs), language
-    /// system|en|fr|ru|de|zh|es|uk|pl (the window's language; system follows the computer's), accent
-    /// violet|blue|teal|green|amber|red|pink, background PATH (a picture behind Home; "default"
-    /// shows Horizon's landscape), native-profile fast|release (the Cargo profile native mods
+    /// system|en|fr|ru|de|zh|es|uk|pl (the window's language; system follows the computer's), palette
+    /// NAME (grayscale, tokyo-night, tokyo-night-storm, catppuccin-latte|frappe|macchiato|mocha,
+    /// gruvbox-dark, nord, dracula, rose-pine, solarized-dark|light, one-dark, kanagawa,
+    /// everforest; "default" is grayscale), native-profile fast|release (the Cargo profile native mods
     /// build with: fast is incremental, release is slower to build and slightly faster to play)
     Settings {
         #[arg(value_parser = SETTING_KEYS)]
@@ -958,7 +959,7 @@ pub fn command() -> clap::Command {
 pub const AI_COMMANDS: [&str; 2] = ["mcp", "agent-config"];
 
 /// The keys `settings` sets.
-const SETTING_KEYS: [&str; 13] = [
+const SETTING_KEYS: [&str; 12] = [
     "selected-version",
     "minecraft-dir",
     "server-dir",
@@ -969,8 +970,7 @@ const SETTING_KEYS: [&str; 13] = [
     "proxy",
     "while-playing",
     "language",
-    "accent",
-    "background",
+    "palette",
     "native-profile",
 ];
 
@@ -1006,23 +1006,19 @@ fn set_setting(s: &mut backend::Settings, key: &str, value: &str) -> Result<(), 
             s.while_playing = backend::WhilePlaying::parse(value)
                 .ok_or_else(|| format!("{value}: say stay, minimize or hide"))?
         }
-        "accent" => {
-            use horizon_launcher::themes::Accent;
-            s.accent = Accent::parse(value).ok_or_else(|| {
-                let names: Vec<_> = Accent::ALL.iter().map(|a| a.name()).collect();
-                format!(
-                    "{value}: say {} or a hue in degrees (0 to 360)",
+        "palette" => {
+            use horizon_launcher::palette::{Palette, ALL, DEFAULT};
+            let name = value.trim().to_ascii_lowercase();
+            s.palette = if name == "default" {
+                String::new()
+            } else if ALL.iter().any(|p| p.name == name) {
+                Palette::named(&name).name.to_string()
+            } else {
+                let names: Vec<_> = ALL.iter().map(|p| p.name).collect();
+                return Err(format!(
+                    "{value}: say one of {} (default is {DEFAULT})",
                     names.join(", ")
-                )
-            })?
-        }
-        "background" => {
-            s.background = match value.trim() {
-                "default" | "" => None,
-                file => Some(horizon_launcher::themes::keep_background(
-                    &backend::data_dir(),
-                    std::path::Path::new(file),
-                )?),
+                ));
             }
         }
         "language" => {
@@ -1070,8 +1066,7 @@ fn settings_json(s: &backend::Settings) -> serde_json::Value {
         "desktop_entry": s.desktop_entry.unwrap_or(true),
         "while_playing": s.while_playing.name(),
         "language": s.language.map_or("system", |l| l.code()),
-        "accent": s.accent.name(),
-        "background": horizon_launcher::themes::background(&backend::data_dir(), s.background.as_deref()),
+        "palette": s.palette_name(),
         "native_profile": native_mods::Profile::from_setting(s.native_release).name(),
         "no_ai": backend::no_ai(),
     })
@@ -1439,13 +1434,8 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
             if as_json {
                 json(serde_json::to_value(&links).unwrap());
             } else {
-                for (name, url) in [
-                    ("Discord", &links.discord),
-                    ("Sponsor", &links.sponsor),
-                    ("Website", &links.website),
-                ] {
-                    println!("{name:<8} {}", if url.is_empty() { "(none)" } else { url });
-                }
+                let url = &links.website;
+                println!("GitHub   {}", if url.is_empty() { "(none)" } else { url });
             }
         }
         Cmd::NoAi { state } => {

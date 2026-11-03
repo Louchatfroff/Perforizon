@@ -1,76 +1,30 @@
-//! The launcher's frame in the night look (docs/design-system.md, "Night"): the sidebar's plate
-//! and rows, and the top bar's tabs, icon buttons and account chip. The sky shows between them;
-//! only the sidebar and the selected or hovered parts are plates.
-use crate::plate::{alpha, cut};
 use crate::theme::{self, night, Step, Theme};
 use crate::{hover_fade, keyboard, track_hover};
 use gpui::{div, prelude::*, px, rgb, Div, FontWeight, Hsla, SharedString, Stateful};
 
-/// A night colour as GPUI's.
 pub fn c(color: u32) -> Hsla {
     rgb(color).into()
 }
 
-/// Text in one of the night's type steps (`night::TYPE`), at its own weight.
 pub fn text(step: Step, color: Hsla) -> Div {
     div()
-        .font_family(if step.px >= night::DISPLAY.px {
-            theme::DISPLAY_FONT
-        } else {
-            theme::FONT
-        })
-        .font_weight(FontWeight(step.weight as f32))
+        .font_family(theme::MONO)
+        .font_weight(FontWeight::NORMAL)
         .text_size(px(step.px))
         .line_height(px(step.line_px()))
         .text_color(color)
 }
 
-/// The sidebar's ground: `card` at its opacity from the top of the window to the bottom, with a
-/// 1 px stroke on its right edge. Square: it meets the window's edges.
 pub fn sidebar_plate(t: &Theme) -> Div {
-    let n = t.night;
-    div()
-        .bg(alpha(n.card, n.card_alpha))
-        .border_r_1()
-        .border_color(alpha(n.stroke, n.stroke_alpha))
+    div().bg(t.side).border_r_1().border_color(t.outline)
 }
 
-/// A plate behind a selected row or tab: `card_hi`, its corners cut in `steps` pixel steps.
-fn selected(steps: usize, t: &Theme) -> Div {
-    let n = t.night;
-    cut(
-        night::PIXEL_CORNER,
-        steps,
-        Some(alpha(n.card_hi, n.card_hi_alpha)),
-        Some((alpha(n.stroke, n.stroke_alpha * 1.5), 1.)),
-    )
-    .absolute()
-    .top_0()
-    .left_0()
-    .size_full()
-}
-
-/// The same shape, fading in while the pointer is over `id`, at half the selected plate's
-/// opacity.
-fn hovered(id: &SharedString, steps: usize, t: &Theme) -> gpui::AnyElement {
-    let n = t.night;
-    let layer = move || {
-        cut(
-            night::PIXEL_CORNER,
-            steps,
-            Some(alpha(n.card_hi, n.card_hi_alpha * 0.5)),
-            None,
-        )
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-    };
+fn hovered(id: &SharedString, t: &Theme) -> gpui::AnyElement {
+    let color = t.raised;
+    let layer = move || div().absolute().top_0().left_0().size_full().bg(color);
     hover_fade(id, layer, |d, a| d.opacity(a))
 }
 
-/// A sidebar row (an instance, a server): its picture and two lines go in as children. The
-/// selected one sits on a plate cut in two steps; the others get one while hovered.
 pub fn row(id: impl Into<SharedString>, selected_now: bool, t: &Theme) -> Stateful<Div> {
     let id = id.into();
     let d = div()
@@ -78,30 +32,46 @@ pub fn row(id: impl Into<SharedString>, selected_now: bool, t: &Theme) -> Statef
         .relative()
         .flex()
         .items_center()
-        .gap(px(12.))
-        .h(px(52.))
+        .gap(px(8.))
+        .min_h(px(40.))
         .px(px(8.))
+        .py(px(2.))
+        .font_family(theme::MONO)
         .cursor_pointer();
     let d = if selected_now {
-        d.child(selected(2, t))
+        d.bg(t.sel_bg).text_color(t.sel_fg)
     } else {
-        d.child(hovered(&id, 2, t))
+        d.child(hovered(&id, t))
     };
-    keyboard(track_hover(d, id), t)
+    let marker = div()
+        .relative()
+        .flex_none()
+        .w(px(12.))
+        .text_color(if selected_now { t.sel_fg } else { t.muted })
+        .child(if selected_now { "›" } else { "" });
+    keyboard(track_hover(d.child(marker), id), t)
 }
 
-/// A row's two lines: the name, and its state after a small square in `state`'s colour when it
-/// has one ("Ready · 26.3" in green, "Needs preparing" in amber).
-pub fn row_text(name: impl Into<SharedString>, sub: String, state: Option<Hsla>, t: &Theme) -> Div {
-    let n = t.night;
+pub fn row_text(
+    name: impl Into<SharedString>,
+    sub: String,
+    state: Option<Hsla>,
+    selected: bool,
+    t: &Theme,
+) -> Div {
+    let (name_color, sub_color) = if selected {
+        (t.sel_fg, t.sel_fg)
+    } else {
+        (t.ink, t.muted)
+    };
     div()
         .relative()
         .flex()
         .flex_col()
         .min_w_0()
         .child(
-            text(night::UI, c(n.ink))
-                .font_weight(FontWeight::SEMIBOLD)
+            text(night::UI, name_color)
+                .font_weight(FontWeight::NORMAL)
                 .truncate()
                 .child(name.into()),
         )
@@ -111,49 +81,51 @@ pub fn row_text(name: impl Into<SharedString>, sub: String, state: Option<Hsla>,
                 .items_center()
                 .gap(px(6.))
                 .min_w_0()
-                .children(state.map(|s| div().flex_none().size(px(6.)).bg(s)))
-                .child(text(night::CAPTION, c(n.muted)).truncate().child(sub)),
+                .children(state.map(|s| {
+                    div()
+                        .flex_none()
+                        .text_size(px(10.))
+                        .text_color(if selected { t.sel_fg } else { s })
+                        .child("●")
+                }))
+                .child(text(night::CAPTION, sub_color).truncate().child(sub)),
         )
 }
 
-/// A heading over a group of rows ("Instances", a group's name, "Servers"), with room for a
-/// button on its right.
 pub fn heading(label: impl Into<SharedString>, t: &Theme) -> Div {
     div()
         .flex()
         .items_center()
         .justify_between()
-        .h(px(32.))
+        .h(px(28.))
         .px(px(8.))
-        .mt(px(8.))
+        .mt(px(4.))
         .child(
-            text(night::CAPTION, c(t.night.muted))
-                .font_weight(FontWeight::SEMIBOLD)
+            text(night::CAPTION, t.muted)
+                .font_weight(FontWeight::NORMAL)
                 .child(label.into()),
         )
 }
 
-/// A page's tab in the top bar: its name, on a plate cut in one step while it is the page shown.
 pub fn tab(id: impl Into<SharedString>, label: &str, active: bool, t: &Theme) -> Stateful<Div> {
     let id = id.into();
-    let n = t.night;
     let d = div()
         .id(id.clone())
         .relative()
         .flex()
         .items_center()
-        .h(px(32.))
-        .px(px(14.))
+        .h(px(28.))
+        .px(px(12.))
         .cursor_pointer();
     let d = if active {
-        d.child(selected(1, t))
+        d.bg(t.sel_bg)
     } else {
-        d.child(hovered(&id, 1, t))
+        d.child(hovered(&id, t))
     };
     keyboard(
         track_hover(
             d.child(
-                text(night::UI, c(if active { n.ink } else { n.ink_soft }))
+                text(night::UI, if active { t.sel_fg } else { t.muted })
                     .relative()
                     .child(label.to_string()),
             ),
@@ -163,7 +135,6 @@ pub fn tab(id: impl Into<SharedString>, label: &str, active: bool, t: &Theme) ->
     )
 }
 
-/// A square button with one icon (Settings, the sidebar's `+`), cut in one step.
 pub fn icon_button(
     id: impl Into<SharedString>,
     icon: &'static str,
@@ -172,7 +143,6 @@ pub fn icon_button(
     t: &Theme,
 ) -> Stateful<Div> {
     let id = id.into();
-    let n = t.night;
     let d = div()
         .id(id.clone())
         .relative()
@@ -181,18 +151,21 @@ pub fn icon_button(
         .items_center()
         .justify_center()
         .size(px(size))
+        .border_1()
+        .border_color(t.outline)
+        .rounded(px(0.))
         .cursor_pointer();
     let d = if active {
-        d.child(selected(1, t))
+        d.bg(t.sel_bg)
     } else {
-        d.child(hovered(&id, 1, t))
+        d.child(hovered(&id, t))
     };
     keyboard(
         track_hover(
             d.child(div().relative().child(crate::blocks::icon(
                 icon,
-                (size * 0.5).round(),
-                c(if active { n.ink } else { n.ink_soft }),
+                (size * 0.55).round(),
+                if active { t.sel_fg } else { t.ink },
             ))),
             id,
         ),
@@ -200,40 +173,25 @@ pub fn icon_button(
     )
 }
 
-/// The account chip's plate: `card` cut in one step with its stroke, for the picture and two
-/// lines that go in as children.
 pub fn chip(id: impl Into<SharedString>, t: &Theme) -> Stateful<Div> {
     let id = id.into();
-    let n = t.night;
     let d = div()
         .id(id.clone())
         .relative()
         .flex()
         .min_w_0()
         .items_center()
-        .gap(px(10.))
-        .h(px(40.))
-        .pl(px(6.))
-        .pr(px(12.))
+        .gap(px(8.))
+        .h(px(28.))
+        .px(px(10.))
+        .border_1()
+        .border_color(t.outline)
+        .rounded(px(0.))
         .cursor_pointer()
-        .child(
-            cut(
-                night::PIXEL_CORNER,
-                1,
-                Some(alpha(n.card, n.card_alpha)),
-                Some((alpha(n.stroke, n.stroke_alpha), 1.)),
-            )
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full(),
-        )
-        .child(hovered(&id, 1, t));
+        .child(hovered(&id, t));
     keyboard(track_hover(d, id), t)
 }
 
-/// What a night button is: the one main action (accent, cut in one step), a raised one
-/// (`card_hi`), or only its label until the pointer is over it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Main,
@@ -241,12 +199,9 @@ pub enum Action {
     Quiet,
 }
 
-/// A night button, its label in the UI step: [`Action::Main`] is [`night::PLAY`] tall, the others
-/// [`theme::CONTROL`] and round at [`night::RADIUS_CONTROL`]. Icons and the label go in as
-/// children.
 pub fn action(id: impl Into<SharedString>, kind: Action, t: &Theme) -> Stateful<Div> {
     let id = id.into();
-    let n = t.night;
+    let t = *t;
     let d = div()
         .id(id.clone())
         .relative()
@@ -255,60 +210,50 @@ pub fn action(id: impl Into<SharedString>, kind: Action, t: &Theme) -> Stateful<
         .items_center()
         .justify_center()
         .gap(px(10.))
-        .px(px(16.))
-        .font_family(theme::FONT)
-        .font_weight(FontWeight::MEDIUM)
+        .px(px(24.))
+        .font_family(theme::MONO)
+        .font_weight(FontWeight::NORMAL)
         .text_size(px(night::UI.px))
         .cursor_pointer();
-    let fill = |d: Div| d.absolute().top_0().left_0().size_full();
-    let round = move || fill(div()).rounded(px(night::RADIUS_CONTROL));
+    let bracket = |glyph: &'static str, left: bool| {
+        let b = div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .flex()
+            .items_center()
+            .child(glyph);
+        if left {
+            b.left(px(8.))
+        } else {
+            b.right(px(8.))
+        }
+    };
     let d = match kind {
         Action::Main => d
             .h(px(night::PLAY))
-            .px(px(28.))
+            .px(px(36.))
             .text_size(px(night::TITLE.px))
-            .font_weight(FontWeight::BOLD)
-            .text_color(c(n.on_accent))
-            .child(fill(cut(
-                night::PIXEL_CORNER,
-                1,
-                Some(alpha(n.accent, 1.)),
-                None,
-            )))
-            .child(hover_fade(
-                &id,
-                move || {
-                    fill(cut(
-                        night::PIXEL_CORNER,
-                        1,
-                        Some(alpha(n.on_accent, 0.12)),
-                        None,
-                    ))
-                },
-                |d, a| d.opacity(a),
-            )),
+            .font_weight(FontWeight::NORMAL)
+            .bg(t.face)
+            .text_color(t.on_face)
+            .hover(move |s| s.bg(t.ink))
+            .child(bracket("[", true))
+            .child(bracket("]", false)),
         Action::Raised => d
             .h(px(theme::CONTROL))
-            .rounded(px(night::RADIUS_CONTROL))
-            .bg(alpha(n.card_hi, n.card_hi_alpha))
-            .border_1()
-            .border_color(alpha(n.stroke, n.stroke_alpha))
-            .text_color(c(n.ink))
-            .child(hover_fade(&id, round, move |d, a| {
-                d.bg(alpha(n.ink, 0.06 * a))
-            })),
+            .text_color(t.ink)
+            .hover(move |s| s.bg(t.sel_bg).text_color(t.sel_fg))
+            .child(bracket("[", true))
+            .child(bracket("]", false)),
         Action::Quiet => d
             .h(px(theme::CONTROL))
-            .rounded(px(night::RADIUS_CONTROL))
-            .text_color(c(n.ink_soft))
-            .child(hover_fade(&id, round, move |d, a| {
-                d.bg(alpha(n.card_hi, n.card_hi_alpha * 0.5 * a))
-            })),
+            .text_color(t.muted)
+            .hover(move |s| s.bg(t.raised).text_color(t.ink)),
     };
-    keyboard(track_hover(d, id), t).active(|s| s.opacity(theme::PRESSED))
+    keyboard(track_hover(d, id), &t).active(|s| s.opacity(theme::PRESSED))
 }
 
-/// A label for an [`action`], over its hover layer.
 pub fn label(text_: impl Into<SharedString>) -> Div {
     div().relative().child(text_.into())
 }

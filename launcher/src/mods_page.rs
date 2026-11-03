@@ -255,15 +255,9 @@ pub(super) fn stars(id: &str, t: &theme::Theme) -> Option<Div> {
         Some(r) => {
             let lit = r.average.round() as usize;
             row.children((0..5).map(|i| {
-                blocks::icon(
-                    "star",
-                    12.,
-                    if i < lit {
-                        t.warn
-                    } else {
-                        t.muted.opacity(0.6)
-                    },
-                )
+                div()
+                    .text_color(if i < lit { t.warn } else { t.muted })
+                    .child(if i < lit { "*" } else { "-" })
             }))
             .child(div().ml(px(4.)).child(format!(
                 "{:.1} ({})",
@@ -816,7 +810,7 @@ impl Launcher {
             .h(px(theme::FIELD + 4.))
             .px(px(12.))
             .overflow_hidden()
-            .border_2()
+            .border_1()
             .border_color(if focused { t.accent } else { t.outline })
             .bg(t.well)
             .text_size(px(theme::UI.px))
@@ -1741,7 +1735,7 @@ fn source_switch(
         .pb(px(2.))
         .opacity(theme::DISABLED)
         .child(
-            blocks::pixel(14., FontWeight::MEDIUM)
+            blocks::pixel(14., FontWeight::NORMAL)
                 .text_color(t.muted)
                 .child(tr("CurseForge (coming soon)")),
         );

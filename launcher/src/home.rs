@@ -19,10 +19,6 @@ impl Launcher {
     ) -> Div {
         let t = self.theme;
         let n = t.night;
-        let icon = self
-            .selected_instance()
-            .cloned()
-            .map(|i| self.instance_icon(&i, 56.));
         let instance = self.selected_instance();
         let name = instance.map_or(
             if tag.is_empty() {
@@ -48,16 +44,7 @@ impl Launcher {
                 "· {}",
                 trf("{count} playing now", &[("count", &thousands(count))])
             );
-            match telemetry::stats_url(&self.links.website) {
-                Some(url) => div()
-                    .id("playing-now")
-                    .cursor_pointer()
-                    .hover(move |s| s.text_color(ink))
-                    .child(label)
-                    .on_click(move |_: &ClickEvent, _, cx| cx.open_url(&url))
-                    .into_any_element(),
-                None => div().child(label).into_any_element(),
-            }
+            div().child(label).into_any_element()
         });
         // The official server's own count, from its status ping: opens the Servers page, where
         // it is listed.
@@ -84,7 +71,7 @@ impl Launcher {
             )
             .child(
                 shell::text(night::CAPTION, c(n.ink_soft))
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(FontWeight::NORMAL)
                     .flex()
                     .gap(px(4.))
                     .child(what.join(" · "))
@@ -99,17 +86,12 @@ impl Launcher {
             .gap(px(10.))
             .child(state)
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(16.))
-                    .children(icon)
-                    .child(
-                        shell::text(night::DISPLAY, c(n.ink))
-                            .min_w_0()
-                            .truncate()
-                            .child(name.to_string()),
-                    ),
+                div().flex().items_center().gap(px(16.)).child(
+                    shell::text(night::TITLE, c(n.ink))
+                        .min_w_0()
+                        .truncate()
+                        .child(format!("› {name}")),
+                ),
             )
             .children(instance.map(|i| {
                 shell::text(night::UI, c(n.ink_soft)).child(instances_page::played_line(i))
@@ -139,7 +121,7 @@ impl Launcher {
                     div()
                         .id("install-update")
                         .text_color(c(n.accent_hi))
-                        .font_weight(FontWeight::SEMIBOLD)
+                        .font_weight(FontWeight::NORMAL)
                         .cursor_pointer()
                         .hover(|s| s.opacity(0.8))
                         .child(tr("Install"))
@@ -176,7 +158,7 @@ impl Launcher {
                         shell::text(night::UI, c(n.accent_hi))
                             .relative()
                             .id("ping-notice-ok")
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .font_weight(FontWeight::NORMAL)
                             .cursor_pointer()
                             .hover(|s| s.opacity(0.8))
                             .child(tr("Got it"))
@@ -298,7 +280,7 @@ impl Launcher {
         let heading = |s: &str| {
             shell::text(night::CAPTION, c(n.muted))
                 .relative()
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(FontWeight::NORMAL)
                 .child(tr(s).to_string())
         };
         let mut card = crate::plate::plate(&n)
@@ -314,7 +296,7 @@ impl Launcher {
                 .child(
                     shell::text(night::UI, c(n.ink))
                         .relative()
-                        .font_weight(FontWeight::BOLD)
+                        .font_weight(FontWeight::NORMAL)
                         .child(
                             horizon_launcher::nightly::label(tag)
                                 .unwrap_or_else(|| tag.trim_start_matches('v').to_string()),
@@ -487,7 +469,7 @@ impl Launcher {
                 })
                 .child(
                     shell::text(night::CAPTION, color)
-                        .font_weight(FontWeight::MEDIUM)
+                        .font_weight(FontWeight::NORMAL)
                         .child(tr(name).to_string()),
                 )
         };

@@ -10,38 +10,6 @@ use std::sync::Arc;
 
 /// Textures offered as icons, when the player's prepared files hold them: block faces and items
 /// that read well at sidebar size.
-const TEXTURES: [&str; 24] = [
-    "grass_block_side",
-    "oak_planks",
-    "oak_log",
-    "cobblestone",
-    "bricks",
-    "bookshelf",
-    "crafting_table_front",
-    "tnt_side",
-    "sand",
-    "snow",
-    "ice",
-    "obsidian",
-    "netherrack",
-    "end_stone",
-    "glowstone",
-    "diamond_ore",
-    "diamond",
-    "emerald",
-    "apple",
-    "ender_pearl",
-    "iron_pickaxe",
-    "diamond_sword",
-    "bow",
-    "book",
-];
-
-/// Colours offered as icons: Horizon's accent and a few that sit beside it in both themes.
-const COLOURS: [&str; 8] = [
-    "#5b3fd6", "#3f7fd6", "#2f9e8f", "#4f9e2f", "#c9a227", "#d9732f", "#c4405a", "#7d7591",
-];
-
 /// The dialog: a new instance (`editing` None) or one being changed. Its name and group are the
 /// text fields `Field::InstanceName` and `Field::InstanceGroup`.
 pub(super) struct InstanceDialog {
@@ -49,8 +17,6 @@ pub(super) struct InstanceDialog {
     /// A new instance copies the selected one's worlds, options and packs.
     copy: bool,
     icon: Option<Icon>,
-    /// A picture chosen since it opened (None in it: the instance's is removed on Save).
-    pub(super) picture: Option<Option<instance_icons::Chosen>>,
     pub(super) error: Option<String>,
     busy: bool,
     /// Horizon, or the Java game it plays.
@@ -119,66 +85,6 @@ impl Launcher {
         self.settings.save();
     }
 
-    /// A texture from the selected version's prepared files, its first frame, drawn as pixels.
-    fn texture_image(&mut self, name: &str, size: f32) -> Option<Arc<RenderImage>> {
-        let tag = self.selected().filter(|t| backend::is_prepared(t))?.clone();
-        let scale = self.scale;
-        self.instances
-            .icons
-            .entry((name.to_string(), (size * scale) as u32))
-            .or_insert_with(|| {
-                let path = Icon::Texture(name.into()).texture(&backend::resources(&tag))?;
-                let png = image::open(path).ok()?.to_rgba8();
-                let w = png.width() as usize;
-                // An animated texture is its frames one under another: the first is square.
-                let texels: Vec<[u8; 4]> = png.pixels().take(w * w).map(|p| p.0).collect();
-                Some(art::bake(&texels, w, w, size / w as f32, scale))
-            })
-            .clone()
-    }
-
-    /// An instance's icon, `size` points square (`instance_icons.rs` says which).
-    pub(super) fn instance_icon(&mut self, instance: &Instance, size: f32) -> AnyElement {
-        let t = self.theme;
-        if let Some(picture) = self.instance_picture(instance, size) {
-            return instance_icons::centred(picture, size, self.scale).into_any_element();
-        }
-        let framed = |d: Div| {
-            d.flex()
-                .flex_none()
-                .items_center()
-                .justify_center()
-                .size(px(size))
-                .border_2()
-                .border_color(t.outline)
-        };
-        match &instance.icon {
-            Some(Icon::Colour(hex)) => {
-                let rgb = u32::from_str_radix(&hex[1..], 16).unwrap_or(0);
-                return framed(div().bg(gpui::rgb(rgb)))
-                    .child(
-                        blocks::pixel((size * 0.42).round(), FontWeight::BOLD)
-                            .text_color(gpui::white())
-                            .child(initial(&instance.name)),
-                    )
-                    .into_any_element();
-            }
-            Some(Icon::Texture(name)) => {
-                if let Some(image) = self.texture_image(name, size - 8.) {
-                    return framed(div().bg(t.well))
-                        .child(gpui::img(image).size(px(size - 8.)))
-                        .into_any_element();
-                }
-            }
-            None => {
-                if let Some(mark) = self.instance_mark(instance, size) {
-                    return instance_icons::centred(mark, size, self.scale).into_any_element();
-                }
-            }
-        }
-        blocks::slot(None, &instance.name, size, &t).into_any_element()
-    }
-
     /// The sidebar's instances: those without a group, then each group under its name.
     pub(super) fn instance_items(
         &mut self,
@@ -234,12 +140,10 @@ impl Launcher {
             let state = (matches!(i.kind, InstanceKind::Default | InstanceKind::Own)
                 && i.java.is_none())
             .then_some(if prepared { t.success } else { t.warn });
-            let icon = self.instance_icon(&i, 36.);
             let clicked = i.clone();
             out.push(
                 shell::row(format!("side-instance-{}", i.id), open, &t)
-                    .child(div().relative().child(icon))
-                    .child(shell::row_text(i.name.clone(), sub, state, &t))
+                    .child(shell::row_text(i.name.clone(), sub, state, open, &t))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         match clicked.kind {
                             InstanceKind::Default | InstanceKind::Own => {
@@ -270,7 +174,6 @@ impl Launcher {
         self.servers.focus_soon = Some(Field::InstanceName);
         self.instances.dialog = Some(InstanceDialog {
             icon: editing.as_ref().and_then(|i| i.icon.clone()),
-            picture: None,
             editing: editing.map(|i| i.id),
             copy: false,
             error: None,
@@ -299,10 +202,6 @@ impl Launcher {
             return;
         };
         let icon = d.icon.clone();
-        let picture = d
-            .picture
-            .as_ref()
-            .map(|p| p.as_ref().map(|c| c.png.clone()));
         let editing = d.editing.clone();
         let copy = selected.filter(|_| d.copy);
         // A new Java instance: what it plays, and its name when none is typed.
@@ -345,13 +244,6 @@ impl Launcher {
                 m.group = group;
                 m.icon = icon;
             })?;
-            if let Some(png) = picture {
-                instances::set_picture(
-                    &instance.home,
-                    png.as_deref(),
-                    &horizon_launcher::desktop_seams::to_trash,
-                )?;
-            }
             Ok(instance)
         });
         cx.spawn(async move |this, cx| {
@@ -382,15 +274,9 @@ impl Launcher {
     pub(super) fn instance_dialog(&mut self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let t = self.theme;
         let d = self.instances.dialog.as_ref()?;
-        let editing_id = d.editing.clone();
-        let chosen = d
-            .picture
-            .as_ref()
-            .map(|p| p.as_ref().map(|c| c.preview.clone()));
-        let (editing, copy, icon, error, busy, kind) = (
+        let (editing, copy, error, busy, kind) = (
             d.editing.is_some(),
             d.copy,
-            d.icon.clone(),
             d.error.clone(),
             d.busy,
             d.java.kind,
@@ -407,7 +293,7 @@ impl Launcher {
                 .gap(px(8.))
                 .child(
                     shell::text(theme::night::CAPTION, shell::c(n.muted))
-                        .font_weight(FontWeight::SEMIBOLD)
+                        .font_weight(FontWeight::NORMAL)
                         .child(tr(label).to_string()),
                 )
                 .child(control)
@@ -473,119 +359,6 @@ impl Launcher {
             self.field(Field::InstanceGroup, tr("No group"), 400., cx)
                 .into_any_element(),
         ));
-        let mut tiles: Vec<AnyElement> = Vec::new();
-        let tile = |id: String, chosen: bool| {
-            div()
-                .id(SharedString::from(id))
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(40.))
-                .border_2()
-                .border_color(if chosen { t.accent } else { t.rule })
-                .cursor_pointer()
-                .hover(move |s| s.border_color(t.outline))
-        };
-        let instance =
-            editing_id.and_then(|id| self.instances.list.iter().find(|i| i.id == id).cloned());
-        // The picture it will show: one just chosen, else its own unless that is being removed.
-        let picture = match chosen {
-            Some(chosen) => chosen,
-            None => instance
-                .as_ref()
-                .and_then(|i| self.instance_picture(i, 28.)),
-        };
-        let pictured = picture.is_some();
-        if let Some(image) = picture {
-            tiles.push(
-                tile("instance-icon-picture".into(), true)
-                    .child(instance_icons::centred(image, 28., self.scale))
-                    .into_any_element(),
-            );
-        }
-        // Nothing chosen: the instance's mark (its loader's, Horizon's), when it has one.
-        let mark = instance.as_ref().and_then(|i| self.instance_mark(i, 28.));
-        tiles.push(
-            tile("instance-icon-none".into(), icon.is_none() && !pictured)
-                .child(match mark {
-                    Some(mark) => instance_icons::centred(mark, 28., self.scale).into_any_element(),
-                    None => text(theme::MICRO)
-                        .text_color(t.muted)
-                        .child(tr("NONE"))
-                        .into_any_element(),
-                })
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    if let Some(d) = &mut this.instances.dialog {
-                        d.icon = None;
-                        d.picture = Some(None);
-                    }
-                    cx.notify();
-                }))
-                .into_any_element(),
-        );
-        for name in TEXTURES {
-            let Some(image) = self.texture_image(name, 28.) else {
-                continue;
-            };
-            let chosen = !pictured && icon == Some(Icon::Texture(name.into()));
-            tiles.push(
-                tile(format!("instance-icon-{name}"), chosen)
-                    .bg(t.well)
-                    .child(gpui::img(image).size(px(28.)))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        if let Some(d) = &mut this.instances.dialog {
-                            d.icon = Some(Icon::Texture(name.into()));
-                            d.picture = Some(None);
-                        }
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-            );
-        }
-        for hex in COLOURS {
-            let chosen = !pictured && icon == Some(Icon::Colour(hex.into()));
-            let rgb = u32::from_str_radix(&hex[1..], 16).unwrap_or(0);
-            tiles.push(
-                tile(format!("instance-icon-{hex}"), chosen)
-                    .child(div().size(px(28.)).bg(gpui::rgb(rgb)))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        if let Some(d) = &mut this.instances.dialog {
-                            d.icon = Some(Icon::Colour(hex.into()));
-                            d.picture = Some(None);
-                        }
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-            );
-        }
-        let choose = shell::action("instance-picture", shell::Action::Quiet, &t)
-            .child(shell::label(tr("Choose image…").to_string()))
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.choose_instance_picture(cx);
-            }));
-        // Rows of eleven: a wrapping row is measured as one line, and the plate would end above
-        // the buttons.
-        let (mut tiles, mut rows) = (tiles.into_iter().peekable(), Vec::new());
-        while tiles.peek().is_some() {
-            rows.push(div().flex().gap(px(6.)).children(tiles.by_ref().take(11)));
-        }
-        body = body.child(row(
-            "Icon",
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(10.))
-                .children(rows)
-                .child(div().flex().child(choose))
-                .into_any_element(),
-        ));
-        if self.selected().is_none_or(|t| !backend::is_prepared(t)) {
-            body = body.child(
-                text(theme::CAPTION)
-                    .text_color(t.muted)
-                    .child(tr("Block and item icons come from your prepared game files: prepare a version to see them.")),
-            );
-        }
         if let Some(e) = error {
             body = body.child(text(theme::CAPTION).text_color(t.danger).child(e));
         }
@@ -882,13 +655,4 @@ fn java_line(j: &instances::JavaGame) -> String {
         Some(l) => format!("Java {} · {} {}", j.minecraft, l.kind.name(), l.version),
         None => format!("Java {}", j.minecraft),
     }
-}
-
-/// The first letter or digit of a name, for an icon without a picture.
-fn initial(name: &str) -> String {
-    name.chars()
-        .find(|c| c.is_alphanumeric())
-        .unwrap_or('?')
-        .to_uppercase()
-        .to_string()
 }

@@ -86,7 +86,7 @@ impl Launcher {
             div()
                 .p(px(10.))
                 .bg(t.well)
-                .border_2()
+                .border_1()
                 .border_color(t.outline)
                 .font_family(theme::MONO)
                 .text_size(px(12.))

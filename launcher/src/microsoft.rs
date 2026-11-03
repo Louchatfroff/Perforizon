@@ -4,7 +4,8 @@
 //! the text semibold at 15 pixels; dark: `#2F2F2F` with white text, light: white with `#5E5E5E`
 //! text and a `#8C8C8C` border. The symbol is drawn from the official `ms-symbollockup_mssymbol_19.svg`
 //! (its squares, places and colours as they are there), never recoloured or reshaped; see
-//! THIRD_PARTY_NOTICES.md. Square corners, as Microsoft's own: not the launcher's cut plates.
+//! THIRD_PARTY_NOTICES.md. This button is the one deliberate exception to the launcher's palette
+//! and single monospace face: Microsoft's guidelines fix its colours and type. Square corners, as Microsoft's own: not the launcher's cut plates.
 use super::*;
 
 /// The symbol's squares in its 21-pixel box: left, top, colour.

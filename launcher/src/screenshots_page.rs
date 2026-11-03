@@ -153,7 +153,7 @@ impl Launcher {
                     .flex_none()
                     .w(px(THUMB_W))
                     .h(px(THUMB_H))
-                    .border_2()
+                    .border_1()
                     .border_color(t.outline)
                     .bg(t.well)
                     .cursor_pointer()
@@ -265,7 +265,7 @@ impl Launcher {
                     .flex_1()
                     .min_w_0()
                     .child(
-                        blocks::pixel(17., FontWeight::MEDIUM)
+                        blocks::pixel(17., FontWeight::NORMAL)
                             .text_color(t.ink)
                             .child(taken.format("%Y-%m-%d %H:%M:%S").to_string()),
                     )
@@ -322,7 +322,7 @@ impl Launcher {
                         .relative()
                         .flex_1()
                         .min_h_0()
-                        .border_2()
+                        .border_1()
                         .border_color(t.outline)
                         .bg(t.well)
                         .child(

@@ -25,10 +25,9 @@ impl Launcher {
                 .gap(px(10.))
                 .h(px(theme::CONTROL))
                 .px(px(14.))
-                .border_2()
+                .border_1()
                 .border_color(t.outline)
-                .bg(t.button)
-                .children(blocks::edges(t.button_bevel, t.lip, theme::LIP))
+                .rounded(px(0.))
                 .cursor_pointer()
                 .hover(move |s| s.bg(t.raised))
                 .child(
@@ -36,7 +35,7 @@ impl Launcher {
                         .flex_1()
                         .font_family(theme::PIXEL)
                         .text_size(px(15.))
-                        .font_weight(FontWeight::MEDIUM)
+                        .font_weight(FontWeight::NORMAL)
                         .text_color(t.ink)
                         .child(choice_name(self.settings.language)),
                 )
@@ -54,7 +53,7 @@ impl Launcher {
                 .right_0()
                 .w(px(220.))
                 .p(px(6.))
-                .border_2()
+                .border_1()
                 .border_color(t.outline)
                 .bg(t.surface)
                 .flex()
@@ -80,9 +79,7 @@ impl Launcher {
                                 .text_color(t.ink)
                                 .child(choice_name(choice)),
                         )
-                        .when(chosen, |d| {
-                            d.child(div().size(px(6.)).rounded_full().bg(t.accent))
-                        })
+                        .when(chosen, |d| d.child(div().size(px(6.)).bg(t.accent)))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             this.settings.language = choice;
                             this.settings.save();

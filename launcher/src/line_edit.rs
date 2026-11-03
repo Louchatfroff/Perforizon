@@ -519,7 +519,17 @@ pub(super) fn content(
         };
         div().flex_none().whitespace_nowrap().child(s)
     };
-    let caret = || div().flex_none().w(px(1.)).h(px(14.)).bg(t.ink);
+    let caret = || {
+        div().flex_none().relative().w(px(0.)).h(px(16.)).child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .w(px(2.))
+                .h(px(16.))
+                .bg(t.ink),
+        )
+    };
     let area = edit.area.clone();
     div()
         .relative()
@@ -531,7 +541,7 @@ pub(super) fn content(
         .when(!selected.is_empty(), |d| {
             d.child(
                 text(selected)
-                    .rounded(px(2.))
+                    .rounded(px(0.))
                     .bg(t.accent.opacity(theme::SELECTION)),
             )
         })

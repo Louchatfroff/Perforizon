@@ -65,7 +65,7 @@ impl Launcher {
             .gap(px(10.))
             .child(
                 shell::text(theme::night::CAPTION, shell::c(n.muted))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(FontWeight::NORMAL)
                     .child(tr("Microsoft account").to_string()),
             )
             .child(
@@ -123,7 +123,7 @@ impl Launcher {
                                 .child(
                                     div()
                                         .font_family(theme::MONO)
-                                        .font_weight(FontWeight::BOLD)
+                                        .font_weight(FontWeight::NORMAL)
                                         .text_size(px(30.))
                                         .line_height(px(38.))
                                         .text_color(shell::c(n.ink))

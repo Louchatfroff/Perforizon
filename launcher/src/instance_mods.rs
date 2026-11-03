@@ -368,7 +368,7 @@ impl Launcher {
             .py(px(14.))
             .child(
                 shell::text(night::UI, c(n.ink))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(FontWeight::NORMAL)
                     .child(title),
             )
             .child(field);
@@ -488,7 +488,7 @@ impl Launcher {
                 .hover(move |s| s.bg(alpha(n.warn, 0.26)))
                 .child(
                     shell::text(night::CAPTION, c(n.warn))
-                        .font_weight(FontWeight::SEMIBOLD)
+                        .font_weight(FontWeight::NORMAL)
                         .child(trf("Update {version}", &[("version", &number)])),
                 );
             Some(match busy {
@@ -520,7 +520,7 @@ impl Launcher {
                             .gap(px(6.))
                             .child(
                                 shell::text(night::UI, c(n.ink))
-                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .font_weight(FontWeight::NORMAL)
                                     .child(row.name.clone()),
                             )
                             .child(shell::text(night::CAPTION, c(n.muted)).child(row.version)),

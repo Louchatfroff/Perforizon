@@ -286,7 +286,7 @@ impl Launcher {
             .h(px(320.))
             .overflow_y_scroll()
             .p(px(10.))
-            .border_2()
+            .border_1()
             .border_color(t.outline)
             .bg(t.well)
             .font_family(theme::MONO)

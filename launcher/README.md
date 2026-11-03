@@ -7,10 +7,6 @@ it has its own Cargo workspace and is not part of the game's builds.
 
 ![Play](docs/play.png)
 
-The opening, then Play ([clip](docs/opening.webm)):
-
-![Opening](docs/opening-1.png)
-
 ## What it does
 
 - **Versions**: lists the published builds of horizon-rust/horizon (the current Nightly, the last
@@ -146,13 +142,17 @@ The opening, then Play ([clip](docs/opening.webm)):
   Share log takes the names out of the log too. `horizon-launcher account offline
   [NAME]`, `account select <name>` (an account or an offline name), `account forget-offline
   <name>`.
-- **Accent and Home background**: on top of Dark, Light or System, Settings > Launcher picks an
-  accent (Horizon's violet, blue, teal, green, amber, red or pink) and a picture of the player's
-  own behind Home (PNG, JPEG or WebP, cropped to fill; **Landscape** brings Horizon's back). An
-  accent turns the violet tokens to its hue, then darkens or lightens them just enough to keep
-  white on the Play button at 4.5:1 and the accent at 3:1 on every background (a test holds every
-  accent in both looks to it). The picture is copied into the data folder.
-  `horizon-launcher settings accent NAME`, `settings background PATH|default`.
+- **Terminal look and palettes**: the whole window is drawn like a terminal program: one
+  monospace face (Geist Mono), 1 px square borders with the panel's name in the top border, a
+  header with the spaced wordmark and the pages as tabs, hatched empty states, `[ Buttons ]`,
+  block-character progress bars, a line text cursor, the selected row inverted or led by `›`,
+  and a footer of key hints (Tab and Shift-Tab move, Enter selects, Esc goes back). The colours
+  are one palette of 13 roles (`src/palette.rs`); Settings > Launcher > Palette picks it, and
+  `^p` cycles through them with no restart. Grayscale is the default (neutral grays only);
+  the others are Tokyo Night (night, storm), Catppuccin (Latte, Frappe, Macchiato, Mocha), Gruvbox
+  Dark, Nord, Dracula, Rose Pine, Solarized (dark, light), One Dark, Kanagawa and Everforest,
+  each with its own accent. A test holds every palette's text roles to 4.5:1 on its backgrounds.
+  `horizon-launcher settings palette NAME|default`.
 - **Language**: English, French, Russian, German, Simplified Chinese, Spanish, Ukrainian and Polish.
   The window follows the system's language unless the player picks one in Settings > Launcher
   (each named in itself); a string a table lacks shows in English. The tables are
@@ -209,7 +209,7 @@ The opening, then Play ([clip](docs/opening.webm)):
   keeping every field the launcher doesn't show and the servers joined with Direct Connection. The
   same from the command line: `horizon-launcher multiplayer [list|add|remove] [--instance <name>]`
   and `horizon-launcher play --server <address or name>`.
-- **Patch notes**: each release's notes, newest first, with a link to GitHub Sponsors. Quiet "Sponsor", "Discord" and "Website" links sit in the sidebar footer.
+- **Patch notes**: each release's notes, newest first (the bundled Perforizon patch notes while no release can be read). A quiet GitHub link sits in the sidebar footer. The launcher shows no ads and no sponsor links.
 
 Data lives in the platform's data directory (`~/.local/share/horizon-launcher` on Linux,
 `~/Library/Application Support/horizon-launcher` on macOS, `%APPDATA%\horizon-launcher` on
@@ -247,8 +247,8 @@ page `servers.json` (the list), `servers/<name>/` (the servers created there) an
   Without one, `HTTPS_PROXY` and `HTTP_PROXY` are used when the launcher is started with them, and
   `NO_PROXY` names the hosts to reach directly, a modpack import's jars included. A server on this
   computer never goes through it.
-- **Links**: the Discord invite, the Sponsors page and the website come from `launcher/links.json` on main
-  (`{"discord": "...", "sponsor": "...", "website": "..."}`), so they change without a launcher release. Offline,
+- **Links**: the project link comes from `launcher/links.json` on main
+  (`{"website": "..."}`), so they change without a launcher release. Offline,
   the launcher uses the same values built in; an empty address hides its button.
 
 Long pages, dialogs, the server console and data previews have a visible scrollbar when
@@ -325,7 +325,7 @@ and don't set `%ERRORLEVEL%` / `$LASTEXITCODE`. Scripts that need the exit code 
     horizon-launcher play [--version <tag>] [--instance <name>] [--arg <ARG>]...   start the client; --arg passes an extra argument through (repeatable)
     horizon-launcher server [--dir <dir>] [--version <tag>] [--accept-eula]
     horizon-launcher notes [<tag>]                  patch notes as plain text
-    horizon-launcher links                          the Discord, sponsor and website links
+    horizon-launcher links                          the project link
     horizon-launcher game-args [<line>]             show or set the extra arguments the game starts with
     horizon-launcher update [--check]               Horizon and the launcher
     horizon-launcher logs [--lines N] [--crash]     the end of the game's log, or its newest crash report
@@ -445,7 +445,7 @@ The game writes its log to `logs/latest.log` in the game folder (`HORIZON_HOME`,
 archives the previous one at start as `logs/<date>-<n>.log.gz`, as Minecraft does. When it
 crashes it writes `crash-reports/crash-<date>_<time>-client.txt` beside them. When a game the
 launcher started crashes, the Play page says so, with buttons to open or copy the report, open the
-logs folder and report it on Discord; Settings has the logs folder too. A crash report leaves the
+logs folder and report it on GitHub; Settings has the logs folder too. A crash report leaves the
 machine only if you turn on crash reports (below).
 
 ## Data collection
@@ -499,7 +499,6 @@ bundled so the type is the same on every platform.
 ## Screenshots
 
 ![Servers](docs/servers.png)
-![Friends over the internet](docs/servers-tailscale.png)
 ![Modpacks](docs/modpacks.png)
 ![Versions](docs/versions.png)
 ![Patch notes](docs/patch-notes.png)

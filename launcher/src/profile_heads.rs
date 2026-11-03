@@ -134,11 +134,7 @@ mod tests {
         );
         heads.loaded("player", &current, Some(vec![[0, 255, 0, 255]; 64]), false);
         assert!(heads.0["player"].retry_at.is_none());
-        let theme = Theme::for_appearance(
-            backend::Appearance::Dark,
-            horizon_launcher::themes::Accent::VIOLET,
-            gpui::WindowAppearance::Dark,
-        );
+        let theme = Theme::named("");
         let _ = heads.draw(Some("player"), 32., 2., &theme);
         let key = (32f32.to_bits(), 2f32.to_bits());
         let image = heads.0["player"].images.borrow()[&key].clone();

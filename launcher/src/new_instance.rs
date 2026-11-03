@@ -165,7 +165,7 @@ impl Launcher {
         };
         let heading = |s: &str| {
             shell::text(night::CAPTION, c(n.muted))
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(FontWeight::NORMAL)
                 .child(tr(s).to_string())
         };
         let toggle = |id: &'static str, label: &'static str, on: bool| {
@@ -212,7 +212,7 @@ impl Launcher {
                                 shell::text(night::UI, c(n.ink))
                                     .relative()
                                     .w(px(120.))
-                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .font_weight(FontWeight::NORMAL)
                                     .child(v.id.clone()),
                             )
                             .child(shell::text(night::CAPTION, c(n.muted)).relative().child(
@@ -287,7 +287,7 @@ impl Launcher {
                 .h(px(48.))
                 .w(px(180.))
                 .justify_start()
-                .when(on, |d| d.border_2().border_color(c(n.accent_hi)))
+                .when(on, |d| d.border_1().border_color(c(n.accent_hi)))
                 .gap(px(10.))
                 .children(logo.map(|logo| instance_icons::centred(logo, 24., scale).relative()))
                 .child(

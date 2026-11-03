@@ -302,7 +302,10 @@ pub const INSTALLED: &str = "horizon-native-mods";
 /// Each `.hnmod` is checked again as the registry checks it (Rust and TOML under
 /// `mixins/<id>/`, plus files under its `data/`, nothing run).
 pub fn installed_mods(home: &Path) -> Result<PathBuf, String> {
-    let out = root().join("installed.incoming");
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    home.hash(&mut hasher);
+    let out = root().join(format!("installed.incoming-{:016x}", hasher.finish()));
     let _ = fs::remove_dir_all(&out);
     let mut paths: Vec<PathBuf> = fs::read_dir(home.join(INSTALLED))
         .map(|dir| dir.flatten().map(|e| e.path()).collect())

@@ -9,8 +9,12 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
-pub const REPO: &str = "horizon-rust/horizon";
-pub const README_URL: &str = "https://github.com/horizon-rust/horizon/blob/main/launcher/README.md";
+pub const REPO: &str = match option_env!("PERFORIZON_REPO") {
+    Some(r) if !r.is_empty() => r,
+    _ => "Louchatfroff/Perforizon",
+};
+pub const README_URL: &str =
+    "https://github.com/Louchatfroff/Perforizon/blob/main/docs/perforizon-install.md";
 /// The players' page on connecting an AI agent (the website's docs/agents.md).
 pub const AGENT_DOCS_URL: &str = "https://playhorizon.dev/docs/agents";
 /// This launcher's version: the release workflow sets `HORIZON_LAUNCHER_VERSION` from the
@@ -72,7 +76,7 @@ pub const PLATFORMS: [(&str, &str, &str, &str); 4] = [
     (
         "windows",
         "x86_64",
-        "horizon-windows-x64.zip",
+        "Perforizon-windows-x64.zip",
         "horizon-launcher-windows-x64.zip",
     ),
 ];
@@ -457,13 +461,11 @@ pub fn installable_updates(releases: &[Release]) -> Vec<Release> {
 /// How often a launcher left open looks for new releases: they come out several times a day.
 pub const CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
-/// The community, sponsor and website links and the official server's address, from
+/// The project link and the official server's address, from
 /// `launcher/links.json` on main, so they can change without a launcher release. An empty address
 /// hides its button (an empty `official_server`: no official server offered).
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct Links {
-    pub discord: String,
-    pub sponsor: String,
     pub website: String,
     /// The official server's address, as servers.dat lists it (`server_list::add_official`).
     pub official_server: String,
@@ -476,9 +478,7 @@ impl Default for Links {
     /// What the launcher uses until (or unless) it can read links.json.
     fn default() -> Self {
         Self {
-            discord: "https://discord.gg/playhorizon".into(),
-            sponsor: "https://github.com/sponsors/ludovic111".into(),
-            website: "https://playhorizon.dev".into(),
+            website: format!("https://github.com/{REPO}"),
             official_server: crate::server_list::OFFICIAL_ADDRESS.into(),
             official_server_previous: crate::server_list::OFFICIAL_PREVIOUS
                 .iter()
@@ -495,8 +495,6 @@ impl Links {
         let mut links = Self::default();
         if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(text) {
             for (key, slot) in [
-                ("discord", &mut links.discord),
-                ("sponsor", &mut links.sponsor),
                 ("website", &mut links.website),
                 ("official_server", &mut links.official_server),
             ] {
@@ -3256,23 +3254,12 @@ pub struct Settings {
     /// one now (the owner gate's screen).
     #[serde(default)]
     pub owner_notice_seen: bool,
-    /// Seconds a partner banner (the sidebar's card or the Servers page's banner) has been on
-    /// screen, over every start, up to `partner::SEEN_BEFORE_HIDE`: only then can the player hide it.
-    #[serde(default)]
-    pub partner_seen_secs: u64,
-    /// The player hid a partner banner: the sidebar's card and the Servers page's banner are both gone for good.
-    #[serde(default)]
-    pub partner_hidden: bool,
     /// What the window does while the game runs. Stays by default.
     #[serde(default)]
     pub while_playing: WhilePlaying,
-    /// The accent colour on top of the appearance (`themes::Accent`). Horizon's violet by default.
-    #[serde(default)]
-    pub accent: crate::themes::Accent,
-    /// Home's background: a picture the player picked, kept in the data folder under this name
-    /// (`themes::keep_background`). Unset shows Horizon's landscape.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub background: Option<String>,
+    /// The colour palette (`palette::ALL`) by name; unset or unknown is Grayscale.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub palette: String,
     /// The window's language. Unset follows the system's (`i18n::Language::system`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<crate::i18n::Language>,
@@ -3314,11 +3301,6 @@ impl Settings {
             {
                 fields.remove("while_playing");
             }
-            if fields.get("accent").is_some_and(|a| {
-                serde_json::from_value::<crate::themes::Accent>(a.clone()).is_err()
-            }) {
-                fields.remove("accent");
-            }
             // A language this launcher doesn't have yet follows the system's.
             if fields.get("language").is_some_and(|l| {
                 serde_json::from_value::<Option<crate::i18n::Language>>(l.clone()).is_err()
@@ -3327,6 +3309,9 @@ impl Settings {
             }
         }
         serde_json::from_value(value).unwrap_or_default()
+    }
+    pub fn palette_name(&self) -> &'static str {
+        crate::palette::Palette::named(&self.palette).name
     }
     /// Whether the launcher keeps its entry in the applications menu (Linux).
     pub fn desktop_entry(&self) -> bool {
@@ -3660,7 +3645,7 @@ pub fn {f}("
         );
         assert_eq!(
             platform_assets("windows", "x86_64").map(|(game, _)| game),
-            Some("horizon-windows-x64.zip")
+            Some("Perforizon-windows-x64.zip")
         );
         assert_eq!(platform_assets("linux", "aarch64"), None);
         assert_eq!(platform_assets("macos", "x86"), None);
@@ -3921,23 +3906,6 @@ pub fn {f}("
         assert_eq!((future.language, future.game_args.as_str()), (None, "--x"));
         let saved = serde_json::to_value(Settings::default()).unwrap();
         assert!(saved.get("language").is_none(), "unset is left out");
-    }
-
-    #[test]
-    fn the_accent_is_violet_unless_picked_and_an_unknown_one_keeps_the_rest() {
-        use crate::themes::Accent;
-        assert_eq!(Settings::parse("{}").accent, Accent::VIOLET);
-        let teal =
-            Settings::parse(r#"{"accent": "teal", "background": "background-0123456789ab.png"}"#);
-        assert_eq!(
-            (teal.accent, teal.background.as_deref()),
-            (Accent::TEAL, Some("background-0123456789ab.png"))
-        );
-        let future = Settings::parse(r#"{"accent": "plaid", "game_args": "--x"}"#);
-        assert_eq!(
-            (future.accent, future.game_args.as_str()),
-            (Accent::VIOLET, "--x")
-        );
     }
 
     #[test]
@@ -4376,29 +4344,29 @@ pub fn {f}("
     #[test]
     fn links_fall_back_to_the_built_in_ones() {
         let defaults = Links::default();
-        assert_eq!(defaults.discord, "https://discord.gg/playhorizon");
-        assert_eq!(defaults.sponsor, "https://github.com/sponsors/ludovic111");
-        assert_eq!(defaults.website, "https://playhorizon.dev");
+        assert_eq!(
+            defaults.website,
+            "https://github.com/Louchatfroff/Perforizon"
+        );
         // The file on main says the same thing as the defaults.
         assert_eq!(Links::parse(include_str!("../links.json")), defaults);
         // Unreadable or missing, offline included: the defaults.
         assert_eq!(Links::parse(""), defaults);
         assert_eq!(Links::parse("<html>404</html>"), defaults);
         assert_eq!(Links::parse("[1]"), defaults);
-        assert_eq!(Links::parse(r#"{"discord": 5}"#), defaults);
+        assert_eq!(Links::parse(r#"{"website": 5}"#), defaults);
         // A key that is missing keeps its default; a new address replaces it; empty hides it.
         assert_eq!(
-            Links::parse(r#"{"discord": "https://x.y/z"}"#),
+            Links::parse(r#"{"website": "https://x.y/z"}"#),
             Links {
-                discord: "https://x.y/z".into(),
+                website: "https://x.y/z".into(),
                 ..defaults.clone()
             }
         );
         assert_eq!(
-            Links::parse(r#"{"discord": "", "sponsor": " "}"#),
+            Links::parse(r#"{"website": " "}"#),
             Links {
-                discord: String::new(),
-                sponsor: String::new(),
+                website: String::new(),
                 ..defaults.clone()
             }
         );

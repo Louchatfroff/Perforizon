@@ -143,7 +143,7 @@ pub fn render(source: &str, t: &Theme) -> AnyElement {
         let highlights = spans.into_iter().map(|(range, span)| {
             let style = match span {
                 Span::Strong => HighlightStyle {
-                    font_weight: Some(FontWeight::SEMIBOLD),
+                    font_weight: Some(FontWeight::NORMAL),
                     color: Some(t.ink),
                     ..Default::default()
                 },
@@ -177,7 +177,7 @@ pub fn render(source: &str, t: &Theme) -> AnyElement {
             Block::Heading(level, text, spans) => div()
                 .pt(px(if level <= 2 { 12. } else { 6. }))
                 .text_size(px(if level <= 2 { 16. } else { 14. }))
-                .font_weight(FontWeight::MEDIUM)
+                .font_weight(FontWeight::NORMAL)
                 .text_color(t.ink)
                 .child(styled(text, spans))
                 .into_any_element(),
@@ -233,7 +233,7 @@ pub fn render(source: &str, t: &Theme) -> AnyElement {
                         line = line.child(
                             cell.when(i == 0, |d| {
                                 d.text_color(t.ink)
-                                    .font_weight(FontWeight::MEDIUM)
+                                    .font_weight(FontWeight::NORMAL)
                                     .text_size(px(12.5))
                             })
                             .child(styled(text, spans)),

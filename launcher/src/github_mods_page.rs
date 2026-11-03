@@ -204,7 +204,7 @@ impl Launcher {
             .h(px(theme::FIELD + 4.))
             .px(px(12.))
             .overflow_hidden()
-            .border_2()
+            .border_1()
             .border_color(if focused { t.accent } else { t.outline })
             .bg(t.well)
             .text_size(px(theme::UI.px))
