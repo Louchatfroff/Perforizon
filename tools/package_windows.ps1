@@ -16,7 +16,7 @@ $Bins = "horizon-client.exe", "horizon-ctl.exe", "horizon-prepare.exe"
 
 if (-not $SkipBuild) {
     if ($StaticCrt) { $env:RUSTFLAGS = "-C target-feature=+crt-static" }
-    cargo build --profile $Profile --locked -p horizon-client --bin horizon-client --bin horizon-ctl -p horizon-prepare --bin horizon-prepare
+    cargo build --profile $Profile --locked -p horizon-client --bin horizon-client -p horizon-client-lib --bin horizon-ctl -p horizon-prepare --bin horizon-prepare
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 }
 
