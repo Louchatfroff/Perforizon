@@ -232,6 +232,7 @@ mod potions;
 mod powder_snow;
 mod prediction;
 mod pumpkin;
+mod pvp;
 mod quick_actions;
 mod raids;
 mod recipe_book;
@@ -388,8 +389,15 @@ use winit::{
 /// The time a frame spends uploading chunk meshes when the player set no
 /// Chunk Updates or Upload Budget: a burst past it waits for the next frames.
 const AUTO_UPLOAD_TIME: Duration = Duration::from_millis(2);
+/// The farthest a block entity can draw (an End gateway's view distance).
+const BLOCK_ENTITY_REACH: f64 = 256.0;
 /// A frame's finished meshes up to this many upload at once, unqueued.
 const AUTO_UPLOADS_AT_ONCE: usize = 8;
+const AUTO_UPLOAD_BYTES: u64 = 8 << 20;
+
+fn auto_upload_full(count: usize, elapsed: Duration, bytes: u64, size: u64) -> bool {
+    count > 0 && (elapsed >= AUTO_UPLOAD_TIME || bytes + size > AUTO_UPLOAD_BYTES)
+}
 
 #[derive(Clone)]
 struct Options {
@@ -2126,6 +2134,8 @@ struct Game<'a> {
     far_beacons: HashMap<(i32, i32, i32), Vec<(u32, i32)>>,
     /// The detail revision, centre and radius `Lod::update` last had covered for.
     lod_covered_at: Option<(u64, (i32, i32), i32)>,
+    remote_drop_pending: bool,
+    block_entity_scan: horizon_client::scan_cache::ScanCache<([i32; 3], u32)>,
     options: Options,
     player: Option<PlayerMotion>,
     spawn: Option<Vec3>,
@@ -2235,6 +2245,8 @@ struct Game<'a> {
     /// Runs of `entity_vertices` by entity, for a shader pack's per-entity draws; recorded only
     /// while `pack_ids` is set (game/shader_packs.rs).
     entity_spans: std::cell::RefCell<Vec<horizon_client::gfx::pack_draw::EntitySpan>>,
+    /// The particles the GPU expands this frame (`gpuParticles`).
+    particle_instances: horizon_client::gfx::gpu_particles::ParticleInstances,
     /// The glowing entities' silhouettes this frame (game/glowing.rs).
     glowing_vertices: std::cell::RefCell<Vec<Vertex>>,
     /// The shader pack's entity and block entity ids, while one draws entities.
@@ -2245,6 +2257,7 @@ struct Game<'a> {
     previous: Instant,
     /// FramerateLimitTracker.latestInputTime.
     last_input: Instant,
+    input_at: Option<Instant>,
     /// Controllers (Horizon's own).
     pad: pad::Pads,
     frames: u64,
@@ -2292,6 +2305,7 @@ struct Game<'a> {
     riding_sound: Option<u32>,
     /// `LocalPlayer.wasFallFlying` for the elytra's flying sound.
     was_fall_flying: bool,
+    pvp: pvp::PvpState,
     /// Bees whose buzz is playing, and whether it is the aggressive one.
     bee_sounds: HashMap<u32, bool>,
     /// Guardians whose attack hum is playing.
@@ -2691,6 +2705,7 @@ struct Game<'a> {
     gpu_utilization: f64,
     /// The mobs `mob_geometry` drew last frame (`lastEntityRenderStateCount`).
     rendered_mobs: std::cell::Cell<usize>,
+    distant_mobs: std::cell::RefCell<creatures::DistantMobs>,
     /// `ServerChunkCache.lastSpawnState` of each level: its spawnable chunks
     /// and each `MobCategory`'s count.
     spawn_counts: HashMap<Dim, (i32, [i32; 8])>,
@@ -3266,6 +3281,9 @@ impl Game<'_> {
         player.item_use_slows_sprint = item_use_slows_sprint;
         player.respiration = respiration;
         player.glider = glider;
+        if self.settings.pvp.elytra_optimizer == 1 && !player.glider {
+            player.fall_flying = false;
+        }
         let _ = player.set_sleeping(sleeping);
         player.leather_boots = leather_boots;
         player.freeze_immune = freeze_immune;
@@ -6654,6 +6672,9 @@ impl Game<'_> {
             .map_or(0, |s| s.enchantment_level("minecraft:respiration") as i32);
         player.pitch = self.pitch;
         player.glider = self.glider_worn();
+        if self.settings.pvp.elytra_optimizer == 1 && !player.glider {
+            player.fall_flying = false;
+        }
         // A saved death already dropped inventory/XP and counted the death.
         if player.health.dead_or_dying() {
             self.screen = Screen::Dead;
@@ -7394,6 +7415,11 @@ impl Game<'_> {
     /// `MouseHandler.handleAccumulatedMovement` and `Entity.turn`, once per frame.
     /// An agent moving the mouse (`mouse-move`) counts as a grabbed pointer in
     /// an active window, as it cannot grab the real one.
+    fn mark_input(&mut self) {
+        if self.settings.horizon.latency_hud {
+            self.input_at.get_or_insert_with(Instant::now);
+        }
+    }
     fn apply_mouse_look(&mut self) {
         let look = self.look_options();
         let time = self.started.elapsed().as_secs_f64();
@@ -10120,13 +10146,13 @@ impl Game<'_> {
     ) -> Vec<Vertex> {
         self.entity_spans.borrow_mut().clear();
         // LevelExtractor.extract: the transient blocks queued since the last frame.
-        self.drain_transient_block_queue();
-        self.prepare_entity_culling(camera);
-        self.prepare_trims();
+        horizon_client::spans::time("eg_transient", || self.drain_transient_block_queue());
+        horizon_client::spans::time("eg_culling", || self.prepare_entity_culling(camera));
+        horizon_client::spans::time("eg_trims", || self.prepare_trims());
         self.mark_entity(out.len(), "minecraft:entity_flame");
         // One scan for both passes that draw them (block entities below and the
         // overlay near the end of this function).
-        let cracks = self.cracks(camera);
+        let cracks = horizon_client::spans::time("eg_cracks", || self.cracks(camera));
         let fire_yaw = if self.camera_type == perspective::CameraType::ThirdPersonFront {
             self.yaw + 180.0
         } else {
@@ -10222,10 +10248,12 @@ impl Game<'_> {
         }
         // `ItemEntityRenderer`.
         self.mark_entity(out.len(), "minecraft:item");
-        self.dropped_item_geometry(camera, alpha, &mut out);
+        horizon_client::spans::time("eg_items", || {
+            self.dropped_item_geometry(camera, alpha, &mut out)
+        });
         // `VaultRenderer`.
         self.mark_entity(out.len(), "");
-        self.vault_geometry(camera, alpha, &mut out);
+        horizon_client::spans::time("eg_vault", || self.vault_geometry(camera, alpha, &mut out));
         // `CampfireRenderer`.
         self.mark_entity(out.len(), "");
         self.campfire_geometry(camera, &mut out);
@@ -10234,7 +10262,7 @@ impl Game<'_> {
         self.mark_entity(out.len(), "minecraft:ominous_item_spawner");
         self.ominous_item_spawner_geometry(camera, alpha, &mut out);
         // Mobs and their projectiles (a span each).
-        self.mob_geometry(camera, alpha, &mut out);
+        horizon_client::spans::time("eg_mobs", || self.mob_geometry(camera, alpha, &mut out));
         // In first person only a shader pack's shadow pass draws the player.
         self.mark_player(out.len(), !self.own_body_in_view());
         let player_start = out.len();
@@ -10247,17 +10275,25 @@ impl Game<'_> {
                 .extend(out.drain(player_start..));
         }
         self.mark_entity(out.len(), "minecraft:player");
-        self.guest_model_geometry(camera, alpha, &mut out);
+        horizon_client::spans::time("eg_guests", || {
+            self.guest_model_geometry(camera, alpha, &mut out)
+        });
         self.mark_entity(out.len(), "minecraft:evoker_fangs");
         self.fangs_geometry(camera, alpha, &mut out);
         self.block_item_display_geometry(camera, alpha, &mut out);
         let mut see_through = std::mem::take(&mut self.see_through_vertices);
         see_through.clear();
-        self.name_tag_geometry(camera, alpha, &mut out, &mut see_through);
+        horizon_client::spans::time("eg_names", || {
+            self.name_tag_geometry(camera, alpha, &mut out, &mut see_through)
+        });
         self.test_instance_marker_geometry(camera, &mut out, &mut see_through);
         self.debug_renderer_geometry(camera, &mut out);
-        self.text_display_geometry(camera, alpha, &mut out, &mut see_through);
+        horizon_client::spans::time("eg_text", || {
+            self.text_display_geometry(camera, alpha, &mut out, &mut see_through)
+        });
+        self.pvp_fill_geometry(camera, alpha as f32, &mut see_through);
         self.see_through_vertices = see_through;
+        horizon_client::spans::restart();
         // Entity shadows (EntityRenderer.extractShadow).
         self.mark_translucent_entity(out.len(), "minecraft:entity_shadow");
         // A native shader pack's sun shadows already fall under the entities in the Overworld:
@@ -10323,7 +10359,9 @@ impl Game<'_> {
                 );
             }
         }
+        horizon_client::spans::mark("eg_shadows");
         // Block entities (BlockEntityRenderers): chests, shulker boxes, banners, skulls...
+        let mut scan = std::mem::take(&mut self.block_entity_scan);
         if let Some(r) = &self.renderer {
             let lid = |p: [i32; 3]| self.chest_lid(p, alpha as f32);
             let anim = |p: [i32; 3]| self.block_anim(p, alpha as f32);
@@ -10371,12 +10409,30 @@ impl Game<'_> {
                     v.intersects(o - glam::Vec3::ONE, o + glam::Vec3::splat(2.0))
                 })
             };
-            let visible =
-                r.visible_block_entities(self.settings.chunk_fade)
-                    .filter(|(p, state)| {
-                        self.res.block_entity_render().renders(*state)
-                            && (off_screen(*state) || in_view(p))
-                    });
+            let near = |p: &[i32; 3]| {
+                let d = glam::DVec3::new(
+                    f64::from(p[0]) + 0.5,
+                    f64::from(p[1]) + 0.5,
+                    f64::from(p[2]) + 0.5,
+                ) - camera;
+                d.length_squared() <= BLOCK_ENTITY_REACH * BLOCK_ENTITY_REACH
+            };
+            let all = horizon_client::spans::time("eg_be_scan", || {
+                scan.refresh(
+                    r.block_entity_revision(),
+                    self.settings.chunk_fade,
+                    Instant::now(),
+                    || r.scan_visible_block_entities(self.settings.chunk_fade),
+                )
+            });
+            let visible: Vec<&([i32; 3], u32)> = all
+                .iter()
+                .filter(|(p, state)| {
+                    near(p)
+                        && self.res.block_entity_render().renders(*state)
+                        && (off_screen(*state) || in_view(p))
+                })
+                .collect();
             if self.entity_culler.is_some() || self.pack_ids.is_some() {
                 for block in visible {
                     let start = out.len();
@@ -10391,12 +10447,12 @@ impl Game<'_> {
             } else {
                 self.res
                     .block_entity_render()
-                    .render(&scene, visible, &mut out);
+                    .render(&scene, visible.iter().copied(), &mut out);
             }
             // Mod block entities: their mods draw them (`native_block_entity_submit`),
             // culled by the bounds they give.
-            let mods = r
-                .visible_block_entities(self.settings.chunk_fade)
+            let mods = all
+                .iter()
                 .filter(|(_, state)| !self.res.block_entity_render().renders(*state));
             self.mod_block_entity_geometry(mods, camera, alpha as f32, &mut out);
             self.mark_stage(out.len(), "DESTROY");
@@ -10407,6 +10463,9 @@ impl Game<'_> {
                     .render_breaking(&scene, pos, state.0, stage, &mut out);
             }
         }
+        self.block_entity_scan = scan;
+        horizon_client::spans::mark("eg_blockents");
+        horizon_client::spans::restart();
         // Experience orbs (ExperienceOrbRenderer): pulsing billboards from a 4x4 icon sheet.
         self.mark_entity(out.len(), "minecraft:experience_orb");
         if let Some(r) = self
@@ -10543,12 +10602,18 @@ impl Game<'_> {
         // Particles (ParticleEngine.extract): camera-facing quads.
         self.mark_stage(out.len(), "PARTICLES");
         let world = &self.world;
-        self.particles.render(
+        self.particle_instances.clear();
+        let instanced = self
+            .renderer
+            .as_ref()
+            .is_some_and(|r| r.particle_instancing());
+        self.particles.render_split(
             camera,
             self.yaw,
             self.pitch,
             alpha as f32,
             &|b| world.light(b[0], b[1], b[2]),
+            instanced.then_some(&mut self.particle_instances),
             &mut out,
         );
         // Breaking progress overlays (destroy_stage_0..9): ours and the other players'.
@@ -10581,6 +10646,7 @@ impl Game<'_> {
                 }
             }
         }
+        horizon_client::spans::mark("eg_tail");
         out
     }
 
@@ -13206,7 +13272,17 @@ impl Game<'_> {
                 }
                 _ => ItemPose::Swing,
             };
+            let lowered = if self.settings.pvp.low_shield && &*stack.item == "minecraft:shield" {
+                glam::Mat4::from_translation(glam::Vec3::new(
+                    0.0,
+                    self.settings.pvp.low_shield_y,
+                    0.0,
+                ))
+            } else {
+                glam::Mat4::IDENTITY
+            };
             let m = to_world
+                * lowered
                 * horizon_client::first_person::item_pose(left, inverse_height, attack, pose);
             // Seeded by the player id plus the context ordinal.
             let (context, seed) = if left {
@@ -13263,6 +13339,9 @@ impl Game<'_> {
         )
     }
     fn apply_settings(&mut self) {
+        if self.settings.pvp.toggle_sneak {
+            self.settings.toggle_crouch = true;
+        }
         // LocalPlayer.refreshChatAbilities: the chat shows what the Chat option allows.
         let abilities = self.chat_abilities();
         self.ui.chat.set_abilities(&self.gui.atlas.font, abilities);
@@ -13275,7 +13354,10 @@ impl Game<'_> {
         self.streaming.biome_blend = self.settings.biome_blend;
         self.streaming.smooth_lighting = self.settings.smooth_lighting;
         self.streaming.cutout_leaves = self.settings.cutout_leaves;
-        if remesh {
+        let leaves_changed = self
+            .streaming
+            .set_leaf_distance(self.settings.horizon.leaf_chunks());
+        if remesh || leaves_changed {
             self.all_sections_changed();
         }
         self.audio.master = self.settings.master_volume;
@@ -14513,13 +14595,14 @@ impl Game<'_> {
                 .facts()
                 .get(self.world.block(block[0], block[1], block[2]))
                 .solid_render;
+        let view_radius = self.view_radius();
         // The cave culling search runs on its worker while the frame is prepared.
         if cave_culling
             && self.title.is_none()
             && let Some(renderer) = self.renderer.as_mut()
         {
             horizon_client::spans::time("occlusion", || {
-                renderer.start_occlusion(camera, (self.streaming.radius * 16) as f32)
+                renderer.start_occlusion(camera, (view_radius * 16) as f32)
             });
         }
         let biome = self
@@ -14557,7 +14640,7 @@ impl Game<'_> {
         );
         // visual/water_fog_color: no dimension sets it, its default is #050533.
         let water_fog = blend(|b| Some(b.water_fog), [0.0; 3]);
-        let mut sky = environment.sample(self.world.day_time, Some(biome_sky), Some(biome_fog));
+        let mut sky = environment.sample(self.pvp_day_time(), Some(biome_sky), Some(biome_fog));
         let (rain, thunder) = if self.dim == Dim::Overworld {
             self.world.weather.levels(alpha as f32)
         } else {
@@ -14821,7 +14904,7 @@ impl Game<'_> {
             shadow_scene_revision: (self.world.revision, self.world.chunks.membership_revision()),
             shadow_cache: self.settings.horizon.shadow_cache,
             distance,
-            detail_distance: (self.streaming.radius * 16) as f32,
+            detail_distance: (self.view_radius() * 16) as f32,
             depth_far,
             underwater,
             water_plane: if title
@@ -14886,6 +14969,7 @@ impl Game<'_> {
             }),
             entities: &entities,
             entity_spans: &entity_spans,
+            particles: &self.particle_instances,
             glowing: &glowing,
             dynamic_lights: &self.dynamic_lights,
             colored_lights: &colored_lights,
@@ -14956,6 +15040,7 @@ impl Game<'_> {
         let result = match self.renderer.as_mut() {
             Some(renderer) => {
                 renderer.set_pass_timing(self.debug);
+                renderer.input_mark = self.input_at.take();
                 horizon_client::spans::time("renderer", || renderer.render(&frame))
             }
             None => Err("renderer".into()),
@@ -15388,8 +15473,33 @@ impl Game<'_> {
     /// LOD Distance and Far Detail Reduced as the player chose them.
     fn far_terrain_choice(&self) -> (u32, bool) {
         let g = &self.settings.horizon;
-        let reduced = g.far_detail == horizon_client::graphics::FarDetail::Reduced;
-        (g.lod_distance, reduced)
+        let reduced =
+            g.far_detail == horizon_client::graphics::FarDetail::Reduced || g.far_lod_coarse();
+        let handoff = if self.far_takeover() > 0 {
+            self.streaming.radius as u32
+        } else {
+            0
+        };
+        (g.lod_distance.max(handoff), reduced)
+    }
+    /// Chunks of full sections when far terrain tiles take over sooner than the render distance
+    /// (Performance mode, a local world); 0 when sections reach the render distance.
+    fn far_takeover(&self) -> i32 {
+        let chunks = self.settings.horizon.far_terrain_chunks() as i32;
+        let local = self.remote.is_none() || self.integrated.is_some();
+        if chunks > 0 && chunks < self.streaming.radius && local && self.title.is_none() {
+            chunks
+        } else {
+            0
+        }
+    }
+    /// Chunks around the camera drawn as full sections (`far_takeover`, once the far terrain runs).
+    fn view_radius(&self) -> i32 {
+        match self.far_takeover() {
+            0 => self.streaming.radius,
+            _ if self.lod.is_none() => self.streaming.radius,
+            chunks => chunks,
+        }
     }
     /// LOD Distance as far terrain uses it (`graphics::lod_distance_capped`).
     fn lod_distance(&self) -> u32 {
@@ -15449,15 +15559,24 @@ impl Game<'_> {
         }
     }
     fn update_world(&mut self) {
-        if let Err(e) = self.poll_remote() {
+        horizon_protocol::connection::set_coalescing(self.settings.horizon.net_low_latency);
+        if let Err(e) = horizon_client::spans::time("poll_remote", || self.poll_remote()) {
             log::warn!("Horizon: {e}");
         }
-        self.prepare_lod();
+        if self.remote_drop_pending {
+            horizon_client::spans::time("drop_remote", || self.drop_remote_chunks_out_of_range());
+        }
+        horizon_client::spans::time("prepare_lod", || self.prepare_lod());
         if self.lod.is_some() {
             for &((x, _, z), _, _) in &self.world.light_edits {
                 self.lod_observe.insert((x >> 4, z >> 4));
             }
         }
+        let view_cap = match self.view_radius() {
+            r if r < self.streaming.radius => r,
+            _ => 0,
+        };
+        self.streaming.set_view_cap(view_cap);
         if let Some(p) = &self.player {
             self.streaming.center = (
                 (p.position.x.floor() as i32) >> 4,
@@ -15467,7 +15586,7 @@ impl Game<'_> {
         // The loading screen's chunk map fills ring by ring, as vanilla's.
         self.streaming.loading =
             self.options.execution_role.is_client() && self.loading_reason().is_some();
-        self.tick_pregen();
+        horizon_client::spans::time("tick_pregen", || self.tick_pregen());
         // A headless game has nothing to draw sections with: like a server's, they aren't
         // meshed while it has no renderer.
         if self.options.headless {
@@ -15481,9 +15600,9 @@ impl Game<'_> {
         let (uploads, unloaded) =
             horizon_client::spans::time("streaming", || self.streaming.update(&mut self.world));
         self.streaming.extra.truncate(areas);
-        self.spawn_fresh_chunks();
+        horizon_client::spans::time("spawn_fresh", || self.spawn_fresh_chunks());
         // Before the unloaded chunks' block entities are written and dropped.
-        self.native_chunks_changed(&unloaded);
+        horizon_client::spans::time("native_chunks", || self.native_chunks_changed(&unloaded));
         if let Some(lod) = &mut self.lod {
             self.lod_observe
                 .extend(uploads.iter().map(|(key, _)| (key.0, key.2)));
@@ -15533,11 +15652,20 @@ impl Game<'_> {
             log::warn!("Horizon: failed to save unloaded chunks: {e}");
         }
         let (far_distance, far_reduced) = self.far_terrain_choice();
+        let view_radius = self.view_radius();
         if let Some(renderer) = self.renderer.as_mut() {
             let g = &self.settings.horizon;
             let budgeted = g.chunk_updates > 0 || g.upload_budget_kib > 0;
             // The meshes, once copied, are freed by a worker (`Streaming::free`).
-            if !budgeted && self.pending_uploads.is_empty() && uploads.len() <= AUTO_UPLOADS_AT_ONCE
+            let burst = uploads
+                .iter()
+                .map(|(_, m)| (m.solid.len() + m.translucent.len()) as u64)
+                .sum::<u64>()
+                * std::mem::size_of::<horizon_client::mesher::TerrainVertex>() as u64;
+            if !budgeted
+                && self.pending_uploads.is_empty()
+                && uploads.len() <= AUTO_UPLOADS_AT_ONCE
+                && burst <= AUTO_UPLOAD_BYTES
             {
                 horizon_client::spans::time("upload", || {
                     for (key, mesh) in &uploads {
@@ -15550,6 +15678,7 @@ impl Game<'_> {
                 // sections go first, the rest wait for later frames; a newer
                 // mesh of a waiting section replaces it, and sections of
                 // chunks no longer loaded are dropped.
+                horizon_client::spans::restart();
                 let pending = &mut self.pending_uploads;
                 let fresh: horizon_client::fast_hash::FxHashSet<(i32, i32, i32)> =
                     uploads.iter().map(|(k, _)| *k).collect();
@@ -15577,18 +15706,16 @@ impl Game<'_> {
                     (0, 0)
                 };
                 let (mut count, mut bytes) = (0, 0u64);
-                // Without the player's budgets, uploads stop once they took
-                // AUTO_UPLOAD_TIME of this frame (at least one goes): a burst of
-                // finished meshes spreads over frames, nearest first.
                 let auto = !budgeted;
                 let started = Instant::now();
+                horizon_client::spans::mark("upload_prep");
                 while let Some((_, mesh)) = pending.last() {
-                    if auto && count > 0 && started.elapsed() >= AUTO_UPLOAD_TIME {
-                        break;
-                    }
                     let size = ((mesh.solid.len() + mesh.translucent.len())
                         * std::mem::size_of::<horizon_client::mesher::TerrainVertex>())
                         as u64;
+                    if auto && auto_upload_full(count, started.elapsed(), bytes, size) {
+                        break;
+                    }
                     if (limit > 0 && count >= limit)
                         || (budget > 0 && bytes > 0 && bytes + size > budget)
                     {
@@ -15600,9 +15727,12 @@ impl Game<'_> {
                     count += 1;
                     bytes += size;
                 }
+                horizon_client::spans::mark("upload_queued");
                 self.streaming.free(spent);
             }
-            renderer.remove_columns(unloaded.iter().map(|c| (c.x, c.z)));
+            horizon_client::spans::time("remove_columns", || {
+                renderer.remove_columns(unloaded.iter().map(|c| (c.x, c.z)))
+            });
             if let (Some(lod), Some(player)) = (&mut self.lod, &self.player) {
                 let lod_distance =
                     horizon_client::graphics::lod_distance_capped(far_distance, &renderer.info);
@@ -15613,7 +15743,7 @@ impl Game<'_> {
                 let at = (
                     renderer.lod_detail_revision(),
                     self.streaming.center,
-                    self.streaming.radius,
+                    view_radius,
                 );
                 let covered = (self.lod_covered_at != Some(at)).then(|| {
                     self.lod_covered_at = Some(at);
@@ -15629,7 +15759,7 @@ impl Game<'_> {
                 let meshes = horizon_client::spans::time("lod_update", || {
                     lod.update(
                         [player.position.x, player.position.y, player.position.z],
-                        self.streaming.radius,
+                        view_radius,
                         lod_distance,
                         covered,
                     )
@@ -15708,6 +15838,7 @@ impl ApplicationHandler for Game<'_> {
             // MouseHandler.onMove with the pointer grabbed; applied once per frame.
             self.mouse.on_move(0.0, 0.0, x, y, true, true);
             self.last_input = Instant::now();
+            self.mark_input();
         }
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -15853,6 +15984,7 @@ impl Game<'_> {
                 | WindowEvent::CursorMoved { .. }
         ) {
             self.last_input = Instant::now();
+            self.mark_input();
         }
         // The real mouse takes the pointer back from the keyboard's focus.
         self.key_focus_mouse(event_loop, &event);
@@ -17061,6 +17193,7 @@ impl Game<'_> {
             log::warn!("Horizon: failed to save the world on exit: {e}");
         }
         self.finish_perf();
+        horizon_client_render::gfx::pipeline_cache::save();
     }
     /// winit's `about_to_wait`: what happens between frames (stop requests, the closing
     /// save, world entry, the control socket, pads), then the next frame.
@@ -17233,6 +17366,8 @@ impl<'a> Game<'a> {
             far_beacons: HashMap::new(),
             lod_observe: Default::default(),
             lod_covered_at: None,
+            remote_drop_pending: false,
+            block_entity_scan: Default::default(),
             options,
             player: None,
             spawn: None,
@@ -17304,6 +17439,7 @@ impl<'a> Game<'a> {
             see_through_vertices: Vec::new(),
             shadow_only_vertices: Default::default(),
             entity_spans: Default::default(),
+            particle_instances: Default::default(),
             glowing_vertices: Default::default(),
             pack_ids: None,
             health_hud: hud_layout::HealthHud::default(),
@@ -17311,6 +17447,7 @@ impl<'a> Game<'a> {
             spectator_gui: Default::default(),
             previous: now,
             last_input: now,
+            input_at: None,
             pad: Default::default(),
             frames: 0,
             glint_frame: Default::default(),
@@ -17345,6 +17482,7 @@ impl<'a> Game<'a> {
             riding_cart_sounds: None,
             riding_sound: None,
             was_fall_flying: false,
+            pvp: pvp::PvpState::started_now(),
             bee_sounds: HashMap::new(),
             guardian_sounds: HashSet::new(),
             dropped: Vec::new(),
@@ -17576,6 +17714,7 @@ impl<'a> Game<'a> {
             memory_meter: Default::default(),
             gpu_utilization: 0.0,
             rendered_mobs: Default::default(),
+            distant_mobs: Default::default(),
             spawn_counts: HashMap::new(),
             pause_menu: true,
             pause_focus: None,
@@ -18853,6 +18992,7 @@ fn loading_frame(hud: &HudBatch) -> Frame<'_> {
         nether_lighting: false,
         entities: &[],
         entity_spans: &[],
+        particles: &horizon_client::gfx::gpu_particles::NONE,
         glowing: &[],
         dynamic_lights: &[],
         colored_lights: &[],
@@ -19778,6 +19918,20 @@ fn reset_world_progress(adv: &mut advancements::AdvState, stats: &mut stats::Sta
 #[cfg(test)]
 mod startup_cpu_tests {
     use super::*;
+
+    #[test]
+    fn auto_uploads_stop_on_time_or_bytes_but_the_first_always_goes() {
+        let fast = Duration::ZERO;
+        assert!(!auto_upload_full(
+            0,
+            AUTO_UPLOAD_TIME * 2,
+            0,
+            AUTO_UPLOAD_BYTES * 2
+        ));
+        assert!(auto_upload_full(1, AUTO_UPLOAD_TIME, 0, 1));
+        assert!(auto_upload_full(1, fast, AUTO_UPLOAD_BYTES, 1));
+        assert!(!auto_upload_full(1, fast, 1, 1));
+    }
 
     #[test]
     fn a_folder_without_prepared_files_is_named_before_loading() {

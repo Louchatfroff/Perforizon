@@ -124,6 +124,17 @@ impl Game<'_> {
             self.streaming.shader_pack_lighting = pack_lighting;
             self.all_sections_changed();
         }
+        let positional =
+            self.settings.extras.dynamic_lights || !self.native_shaders.picked.is_empty();
+        if horizon_client_render::mesher::set_positional_shading(positional) {
+            self.all_sections_changed();
+        }
+        horizon_client_render::gfx::set_late_sky(!self.settings.horizon.exact_parity());
+        let binary =
+            horizon_client_render::mesher::set_binary_greedy(self.settings.horizon.binary_greedy());
+        if horizon_client_render::mesher::set_greedy(self.settings.horizon.greedy()) || binary {
+            self.all_sections_changed();
+        }
         static DEV_PACK: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
         let dev = DEV_PACK.get_or_init(|| std::env::var("HORIZON_SHADER_PACK").ok());
         let picked = active_pack(

@@ -277,6 +277,24 @@ impl Session {
             w.shutdown();
         }
     }
+    /// Hold (or stop holding) small play packets until [`Self::flush`], and write what is held.
+    pub fn set_batching(&self, on: bool) {
+        let mut writer = self.writer.lock().unwrap();
+        if let Some(w) = writer.as_mut()
+            && w.set_batching(on).is_err()
+        {
+            w.shutdown();
+        }
+    }
+    /// Write the packets held since the last flush as one train.
+    pub fn flush(&self) {
+        let mut writer = self.writer.lock().unwrap();
+        if let Some(w) = writer.as_mut()
+            && w.flush().is_err()
+        {
+            w.shutdown();
+        }
+    }
     /// ServerboundResourcePackPacket, in whichever phase the connection is.
     pub fn send_pack_status(&self, id: u128, action: i32) {
         let status = cfg::ResourcePackResponse { id, action };
@@ -326,7 +344,8 @@ impl Session {
     /// doesn't wake a read already waiting, so joining it held the window until
     /// the server dropped the connection, many seconds later.
     pub fn disconnect(&mut self) {
-        if let Some(w) = self.writer.lock().unwrap().take() {
+        if let Some(mut w) = self.writer.lock().unwrap().take() {
+            let _ = w.flush();
             w.shutdown();
         }
         drop(self.thread.take());
@@ -740,7 +759,7 @@ fn receive_play(
         };
         let reply = |p: play::Serverbound| {
             if let Some(w) = shared_writer.lock().unwrap().as_mut() {
-                let _ = w.send(&p.encode());
+                let _ = w.send_now(&p.encode());
             }
         };
         match packet {
@@ -755,7 +774,8 @@ fn receive_play(
             play::Clientbound::StartConfiguration(_) => {
                 let _ = send.send(Event::Reconfiguring);
                 if let Some(w) = shared_writer.lock().unwrap().as_mut() {
-                    let _ = w.send(&play::Serverbound::ConfigurationAcknowledged(Empty).encode());
+                    let _ =
+                        w.send_now(&play::Serverbound::ConfigurationAcknowledged(Empty).encode());
                     configuring.store(true, Ordering::Relaxed);
                 }
                 let registries = configure(
@@ -822,7 +842,7 @@ fn configure(
     let reply = |p: cfg::Serverbound| -> Result<(), Reason> {
         match writer.lock().unwrap().as_mut() {
             Some(w) => w
-                .send(&p.encode())
+                .send_now(&p.encode())
                 .map_err(|e| Reason::plain(connection_lost(e, lang))),
             None => Err(Reason::plain("Disconnected")),
         }
@@ -896,7 +916,7 @@ fn configure(
                 registries.custom_components = content_verified;
                 let mut w = writer.lock().unwrap_or_else(|e| e.into_inner());
                 let w = w.as_mut().ok_or_else(|| Reason::plain("Disconnected"))?;
-                w.send(&cfg::Serverbound::FinishConfiguration(Empty).encode())
+                w.send_now(&cfg::Serverbound::FinishConfiguration(Empty).encode())
                     .map_err(|e| Reason::plain(connection_lost(e, lang)))?;
                 configuring.store(false, Ordering::Relaxed);
                 return Ok(registries);

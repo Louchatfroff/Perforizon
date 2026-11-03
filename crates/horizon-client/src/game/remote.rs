@@ -549,7 +549,7 @@ pub(super) struct Remote {
     players: HashMap<u128, String>,
     /// `ClientPacketListener.playerInfoMap` as player-list entries, and
     /// which of them are listed.
-    tab_players: HashMap<u128, horizon_client::tab_list::TabPlayer>,
+    pub(super) tab_players: HashMap<u128, horizon_client::tab_list::TabPlayer>,
     /// Each listed profile's unpacked `textures` property.
     skin_textures: HashMap<u128, horizon_client::skins::Textures>,
     /// Active skin and cape from the services profile when the server sent none.
@@ -644,6 +644,11 @@ pub(super) struct Remote {
 /// time the player crossed a chunk border at 32 chunks; they decode on the
 /// chunk decoder's thread now, and the frame only inserts them.
 const CHUNK_PACKETS_PER_FRAME: Duration = Duration::from_millis(1);
+/// The time a frame spends forgetting unloaded columns: tearing one down
+/// costs its render sections too, and a chunk border brings dozens.
+const FORGET_PER_FRAME: Duration = Duration::from_millis(1);
+/// Columns forgotten between two looks at the clock.
+const FORGET_BATCH: usize = 4;
 /// Events that have waited this long are all handled in the next frame,
 /// whatever inserting their columns costs, up to a column still decoding:
 /// the packets after a slow machine's chunks don't wait on its frames.
@@ -1675,6 +1680,9 @@ impl Game<'_> {
         let Some(r) = self.remote.as_mut() else {
             return Ok(());
         };
+        let batch = self.settings.horizon.net_low_latency && r.joined && r.reconfiguring.is_none();
+        r.session.set_batching(batch);
+        r.session.flush();
         let mut events = std::mem::take(&mut r.backlog);
         // Chunk packets start decoding now; the frame that reaches one in
         // order inserts its column.
@@ -1693,6 +1701,7 @@ impl Game<'_> {
             .backlog_since
             .is_some_and(|since| since.elapsed() >= BACKLOG_LIMIT);
         let mut chunks = Duration::ZERO;
+        let mut forgets = horizon_client::frame_budget::FrameBudget::new(FORGET_PER_FRAME);
         while let Some(item) = events.pop_front() {
             let chunk = matches!(item, Received::Chunk(_));
             if chunk && !overdue && chunks >= CHUNK_PACKETS_PER_FRAME {
@@ -1720,7 +1729,9 @@ impl Game<'_> {
                         }
                     };
                     if let C::LevelChunkWithLight(p) = *packet {
-                        self.remote_chunk(&p, Some((&format, column)));
+                        horizon_client::spans::time("remote_chunk", || {
+                            self.remote_chunk(&p, Some((&format, column)))
+                        });
                     }
                     chunks += started.map_or(Duration::ZERO, |t| t.elapsed());
                     continue;
@@ -1855,6 +1866,31 @@ impl Game<'_> {
                     self.leave_server(Some(reason))?;
                     self.offer_reconnect(retry);
                     return Ok(());
+                }
+                Event::Packet(packet) if matches!(*packet, C::ForgetLevelChunk(_)) => {
+                    if !overdue && !forgets.left() {
+                        events.push_front(Received::Event(Event::Packet(packet)));
+                        break;
+                    }
+                    let mut columns = Vec::new();
+                    if let C::ForgetLevelChunk(p) = *packet {
+                        columns.push((p.pos[0], p.pos[1]));
+                    }
+                    while columns.len() < FORGET_BATCH
+                        && let Some(Received::Event(Event::Packet(next))) = events.front()
+                        && matches!(**next, C::ForgetLevelChunk(_))
+                    {
+                        if let Some(Received::Event(Event::Packet(next))) = events.pop_front()
+                            && let C::ForgetLevelChunk(p) = *next
+                        {
+                            columns.push((p.pos[0], p.pos[1]));
+                        }
+                    }
+                    forgets.time(|| {
+                        horizon_client::spans::time("forget_columns", || {
+                            self.forget_remote_columns(&columns)
+                        })
+                    });
                 }
                 Event::Packet(packet) => self.handle_packet(*packet)?,
             }
@@ -2076,30 +2112,43 @@ impl Game<'_> {
             (x - r.chunk_center.0).abs() <= range && (z - r.chunk_center.1).abs() <= range
         })
     }
-    /// The columns a moved or resized storage no longer holds.
-    fn drop_remote_chunks_out_of_range(&mut self) {
-        let gone: horizon_client::fast_hash::FxHashSet<(i32, i32)> = self
+    /// The columns a moved or resized storage no longer holds, forgotten a
+    /// time budget at a time: what is left waits for the next frame.
+    pub(super) fn drop_remote_chunks_out_of_range(&mut self) {
+        let mut gone: Vec<(i32, i32)> = self
             .world
             .chunks
             .keys()
             .copied()
             .filter(|&(x, z)| !self.remote_chunk_in_range(x, z))
             .collect();
-        if gone.is_empty() {
-            return;
+        let mut budget = horizon_client::frame_budget::FrameBudget::new(FORGET_PER_FRAME);
+        while budget.left() && !gone.is_empty() {
+            let batch = horizon_client::frame_budget::take_batch(&mut gone, FORGET_BATCH);
+            budget.time(|| self.forget_remote_columns(&batch));
         }
-        let mut freed = Vec::with_capacity(gone.len());
-        for &(x, z) in &gone {
-            freed.extend(self.streaming.forget(&mut self.world, x, z));
-        }
+        self.remote_drop_pending = !gone.is_empty();
+    }
+    fn forget_remote_columns(&mut self, columns: &[(i32, i32)]) {
+        let gone: horizon_client::fast_hash::FxHashSet<(i32, i32)> =
+            columns.iter().copied().collect();
+        let mut freed = Vec::with_capacity(columns.len());
+        horizon_client::spans::time("fg_streaming", || {
+            for &(x, z) in columns {
+                freed.extend(self.streaming.forget(&mut self.world, x, z));
+            }
+        });
         if let Some(renderer) = self.renderer.as_mut() {
-            renderer.remove_columns(gone.iter().copied());
+            horizon_client::spans::time("fg_renderer", || {
+                renderer.remove_columns(columns.iter().copied())
+            });
         }
-        horizon_client::chunk::free_columns(freed, gone.len());
-        // One pass for all of them.
-        self.world
-            .block_entities
-            .retain(|k, _| !gone.contains(&(k.0 >> 4, k.2 >> 4)));
+        horizon_client::spans::time("fg_retain", || {
+            self.world
+                .block_entities
+                .retain(|k, _| !gone.contains(&(k.0 >> 4, k.2 >> 4)))
+        });
+        horizon_client::chunk::free_columns(freed, columns.len());
     }
     /// `handleBlockEntityData`: the block entity at `pos`, when it is of the
     /// packet's type, loads the tag (`loadWithComponents`); an empty tag
@@ -2970,16 +3019,7 @@ impl Game<'_> {
             C::LevelChunkWithLight(p) => self.remote_chunk(&p, None),
             C::LightUpdate(p) => self.remote_light_update(&p),
             C::ChunksBiomes(p) => self.remote_chunks_biomes(&p),
-            C::ForgetLevelChunk(p) => {
-                let [x, z] = p.pos;
-                self.streaming.forget(&mut self.world, x, z);
-                self.world
-                    .block_entities
-                    .retain(|k, _| (k.0 >> 4, k.2 >> 4) != (x, z));
-                if let Some(renderer) = self.renderer.as_mut() {
-                    renderer.remove_columns([(x, z)]);
-                }
-            }
+            C::ForgetLevelChunk(p) => self.forget_remote_columns(&[(p.pos[0], p.pos[1])]),
             C::ChunkBatchFinished(_) => {
                 // ChunkBatchSizeCalculator's ceiling; meshing runs on workers.
                 self.send(S::ChunkBatchReceived(play::ChunkBatchReceived {
@@ -3041,7 +3081,10 @@ impl Game<'_> {
             C::LevelParticles(p) => self.remote_level_particles(&p),
             C::Explode(p) => self.remote_explode(&p),
             C::Sound(p) => {
-                if let Some(name) = self.remote_sound_name(&p.sound) {
+                if let Some(name) = self
+                    .remote_sound_name(&p.sound)
+                    .filter(|name| !self.pvp_swallow_sound(name))
+                {
                     let at = [
                         f64::from(p.x) / 8.0,
                         f64::from(p.y) / 8.0,
@@ -3669,6 +3712,7 @@ impl Game<'_> {
                         .player
                         .as_ref()
                         .map(|pl| [pl.position.x, pl.position.y, pl.position.z]);
+                    self.pvp_hurt_us();
                     if let Some(pl) = self.player.as_mut() {
                         pl.health.animate_hurt();
                     }
@@ -3685,6 +3729,7 @@ impl Game<'_> {
                             pitch,
                         );
                     }
+                } else if self.pvp_swallow_hurt(p.id as u32) {
                 } else if let Some(m) = self.mobs.iter_mut().find(|m| m.id == p.id as u32) {
                     m.limb_speed = 1.5;
                     m.hurt_time = 10;
@@ -5369,6 +5414,9 @@ impl Game<'_> {
         // including while waiting for chunks. Keep it outside early returns.
         if self.remote.as_ref().is_some_and(|r| r.joined) {
             self.send(S::ClientTickEnd(Empty));
+            if let Some(r) = &self.remote {
+                r.session.flush();
+            }
         }
         Ok(())
     }
@@ -5716,6 +5764,7 @@ impl Game<'_> {
         if !dead {
             self.remote_tick_using();
         }
+        self.pvp_tick();
         if flying != was_flying {
             self.send(S::PlayerAbilities(play::PlayerAbilitiesRequest {
                 flags: if flying { 2 } else { 0 },
@@ -7020,6 +7069,10 @@ impl Game<'_> {
             if spectator {
                 return true;
             }
+            if self.pvp_anchor_ghost(hit.pos, seq) {
+                self.with_hand(hand, Game::swing_arm);
+                return true;
+            }
             // Only a predicted placement (predict_place) marks a cell whose
             // resend plays a place sound: an empty hand or a non-block item
             // places nothing (BlockItem.place is where the sound comes from).
@@ -7975,6 +8028,7 @@ impl Game<'_> {
             // VehicleEntity.hurtServer, ItemFrame and ArmorStand hurtServer,
             // a painting broken or an EndCrystal hurtServer: the server decides.
             self.send(S::Attack(play::Attack { id: hit.id }));
+            self.pvp_crystal_struck(hit.id);
             self.reset_attack_strength();
         } else if let Some((i, distance)) = self.mob_hit()
             && self.before_block(distance)
@@ -7982,6 +8036,7 @@ impl Game<'_> {
             self.send(S::Attack(play::Attack {
                 id: self.mobs[i].id as i32,
             }));
+            self.pvp_predict_hit(i, distance);
             self.remote_player_attack(i);
             self.reset_attack_strength();
         } else if !self.entity_targeted()
@@ -8053,7 +8108,7 @@ impl Game<'_> {
     }
 
     /// An attribute's value on this client's player, if its map has the attribute.
-    fn own_attribute(&mut self, id: &str) -> Option<f64> {
+    pub(super) fn own_attribute(&mut self, id: &str) -> Option<f64> {
         let p = self.player.as_mut()?;
         let key = p.attributes.key(id)?;
         p.attributes.lookup(Some(&key))?;

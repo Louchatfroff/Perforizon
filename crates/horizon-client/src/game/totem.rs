@@ -176,6 +176,16 @@ impl Game<'_> {
         ) else {
             return;
         };
+        let pvp = &self.settings.pvp;
+        let small = pvp.small_totem && &*stack.item == TOTEM;
+        if small && pvp.small_totem_hidden {
+            return;
+        }
+        let pose = if small {
+            pose * glam::Mat4::from_scale(glam::Vec3::splat(pvp.small_totem_scale))
+        } else {
+            pose
+        };
         let state = self.resolve_item(stack, DisplayContext::Fixed, None, 0);
         let to_world = view.inverse();
         let (a, b) = horizon_client::item_render::gui::items_3d_lights();

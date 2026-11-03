@@ -321,6 +321,24 @@ impl Game<'_> {
                     self.audio.preview(source, volume);
                 }
                 Event::Volume(..) => {}
+                Event::RunAutotune
+                    if self.title.is_some()
+                        || !self.creative
+                        || (self.remote.is_some() && self.integrated.is_none()) => {}
+                Event::RunPreciseAutotune if self.remote.is_some() && self.integrated.is_none() => {
+                }
+                Event::RunPreciseAutotune => {
+                    self.handle_option_events(vec![Event::Close])?;
+                    if horizon_client::benchmark::autotune_running() {
+                        horizon_client::benchmark::cancel_precise();
+                    } else {
+                        let _ = self.start_precise_autotune(240.0, 3);
+                    }
+                }
+                Event::RunAutotune => {
+                    self.handle_option_events(vec![Event::Close])?;
+                    let _ = self.start_autotune(240.0);
+                }
                 Event::CopyAgentDetails => {
                     use horizon_client::clipboard::Clipboard;
                     let text = self.agent_details();
@@ -446,6 +464,9 @@ impl Game<'_> {
         ) {
             self.reload_packs();
         }
+        if horizon_client_render::bc7::set_requested(self.settings.horizon.texture_compression()) {
+            self.reload_packs();
+        }
         self.apply_fullscreen();
         let s = &self.settings;
         if let Some(r) = self.renderer.as_mut() {
@@ -453,7 +474,13 @@ impl Game<'_> {
             r.fullbright = s.extras.fullbright;
             r.improved_transparency = s.improved_transparency;
             r.set_present_mode(s.vsync, s.horizon.present_mode);
+            r.set_frame_latency(s.horizon.frame_latency);
             r.animated_textures = s.horizon.animated_textures;
+            r.set_mesh_shaders(s.horizon.mesh_shaders);
+            r.set_vertex_pool(s.horizon.vertex_pool);
+            r.set_hiz_occlusion(s.horizon.hiz_occlusion);
+            r.set_gpu_particles(s.horizon.gpu_particles && !s.horizon.exact_parity());
+            r.set_shadow_indirect(s.horizon.shadow_indirect);
             r.screenshot_quality = s.horizon.screenshot_quality;
             r.set_mipmap_levels(s.mipmap_levels.max(0) as u32);
             r.set_texture_filtering(
@@ -466,6 +493,7 @@ impl Game<'_> {
                 s.horizon.taa,
                 s.horizon.upscaling.ratio(),
             );
+            r.set_post_filters(s.horizon.spatial_aa, s.horizon.fsr);
             r.set_hdr(
                 s.horizon.hdr,
                 s.horizon.paper_white_nits() as f32,

@@ -71,7 +71,7 @@ naga = { path = "third_party/naga" }
 debug = "line-tables-only"
 
 [profile.release]
-lto = "thin"
+lto = "fat"
 codegen-units = 1
 
 # Optimized but quick-to-link builds for iteration: cargo build --profile fast

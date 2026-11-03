@@ -92,7 +92,7 @@ impl Game<'_> {
     pub(super) fn is_anchor(&self, state: BlockStateId) -> bool {
         &*self.res.facts().get(state).name == "minecraft:respawn_anchor"
     }
-    fn anchor_charges(&self, state: BlockStateId) -> i32 {
+    pub(super) fn anchor_charges(&self, state: BlockStateId) -> i32 {
         self.pack
             .assets
             .registry

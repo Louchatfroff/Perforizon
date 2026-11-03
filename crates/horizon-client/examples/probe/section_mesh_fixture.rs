@@ -148,7 +148,11 @@ fn scene(
         if !rest.is_empty() {
             return Err("partial quad".into());
         }
-        for quad in vertices {
+        let mut units = Vec::new();
+        for merged in vertices {
+            horizon_client::mesher::split_tiled(merged, |unit| units.push(unit));
+        }
+        for quad in &units {
             let sprite = names
                 .get(&u32::from(quad[0].layer & !OPAQUE_LAYER))
                 .ok_or("unknown sprite layer")?;
@@ -161,7 +165,7 @@ fn scene(
             let vertices: Vec<Value> = quad
                 .iter()
                 .map(|v| {
-                    let ([x, y, z], [u, w]) = (v.pos, v.uv());
+                    let ([x, y, z], [u, w]) = (v.pos(), v.uv());
                     json!([
                         x,
                         y,

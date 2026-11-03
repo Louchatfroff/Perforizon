@@ -39,6 +39,16 @@ const HELP: &[&str] = &[
     "stats [reset]                  frame-time summary since the last reset",
     "narration                      the narrator's status and the last messages it was asked to say",
     "bench SECONDS                  reset stats, wait, then reply with the summary",
+    "graphics KEY VALUE             set a graphics option (horizon-graphics.txt key) now",
+    "graphics-save                  save the options to disk",
+    "pvp KEY [VALUE]               read or set a PvP option (horizon-pvp.txt key)",
+    "perf-mode on|off              measure without a frame cap, VSync or idle limit (off restores them)",
+    "flying on|off                  set the player's creative flight state",
+    "notice TEXT                    show TEXT as a game message in the chat",
+    "autotune [FPS]                 try the performance settings, keep the best, aim for FPS (default 240)",
+    "autotune --precise [FPS [PASSES]]  slow auto-tune on the benchmark scenes; autotune --cancel stops it",
+    "close-world                    save and leave the world for the title screen",
+    "graphics-dump                  every graphics option as it is now",
     "fly X1 Y1 Z1 X2 Y2 Z2 SECONDS [PITCH [raw]]  fly the camera along a line at constant speed, then reply with the frame summary (raw: every frame time too)",
     "open WORLD [SEED] [creative]   open or create a world from the title screen",
     "save                           save the world",
@@ -587,6 +597,12 @@ impl Game<'_> {
                 self.previous_position = to;
                 ok()
             }
+            "flying" => {
+                let on = arg(1)? == "on";
+                let player = self.player.as_mut().ok_or("no player yet")?;
+                player.flying = on;
+                ok()
+            }
             "hotbar" => {
                 let slot: usize = arg(1)?.parse()?;
                 if !(1..=9).contains(&slot) {
@@ -826,6 +842,117 @@ impl Game<'_> {
                 }
                 Ok(Some(summary))
             }
+            "graphics" => {
+                let line = format!(
+                    "{}:{}
+",
+                    arg(1)?,
+                    arg(2)?
+                );
+                self.settings.horizon.merge(&line);
+                self.apply_settings();
+                ok()
+            }
+            "perf-mode" => {
+                static SAVED: std::sync::Mutex<Option<(bool, u32, String, bool)>> =
+                    std::sync::Mutex::new(None);
+                let mut saved = SAVED.lock().unwrap_or_else(|e| e.into_inner());
+                match arg(1)? {
+                    "on" => {
+                        saved.get_or_insert_with(|| {
+                            (
+                                self.settings.vsync,
+                                self.settings.max_fps,
+                                self.settings.inactivity_fps_limit.clone(),
+                                self.options.no_pause,
+                            )
+                        });
+                        self.settings.vsync = false;
+                        self.settings.max_fps = 260;
+                        self.settings.inactivity_fps_limit = "minimized".into();
+                        self.options.no_pause = true;
+                    }
+                    "off" => {
+                        if let Some((vsync, max_fps, inactivity, no_pause)) = saved.take() {
+                            self.settings.vsync = vsync;
+                            self.settings.max_fps = max_fps;
+                            self.settings.inactivity_fps_limit = inactivity;
+                            self.options.no_pause = no_pause;
+                        }
+                    }
+                    other => return Err(format!("perf-mode on or off, not {other}").into()),
+                }
+                self.apply_settings();
+                ok()
+            }
+            "pvp" => {
+                let key = arg(1)?;
+                match words.get(2) {
+                    Some(value) => {
+                        if !self.settings.pvp.set(key, value) {
+                            return Err(format!("unknown pvp option {key}").into());
+                        }
+                        self.apply_settings();
+                        ok()
+                    }
+                    None => match self.settings.pvp.get(key) {
+                        Some(value) => Ok(Some(json!({ key: value }))),
+                        None => Err(format!("unknown pvp option {key}").into()),
+                    },
+                }
+            }
+            "graphics-save" => {
+                self.settings.save(&Self::options_path());
+                ok()
+            }
+            "autotune" => {
+                if words.contains(&"--cancel") {
+                    if !horizon_client::benchmark::cancel_precise() {
+                        return Err("no precise auto-tune is running".into());
+                    }
+                    return ok();
+                }
+                let numbers = words
+                    .iter()
+                    .skip(1)
+                    .filter(|w| !w.starts_with("--"))
+                    .map(|t| t.parse::<f64>())
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let target = numbers.first().copied().unwrap_or(240.0);
+                if words.contains(&"--precise") {
+                    let passes = numbers.get(1).map_or(3, |p| *p as usize);
+                    self.start_precise_autotune(target, passes)?;
+                } else {
+                    self.require_world()?;
+                    self.start_autotune(target)?;
+                }
+                ok()
+            }
+            "close-world" => {
+                self.require_world()?;
+                self.close_world()?;
+                ok()
+            }
+            "graphics-dump" => {
+                let graphics: serde_json::Map<String, serde_json::Value> = self
+                    .settings
+                    .horizon
+                    .serialize()
+                    .lines()
+                    .filter_map(|l| l.split_once(':'))
+                    .map(|(k, v)| (k.to_owned(), json!(v)))
+                    .collect();
+                Ok(Some(json!({ "graphics": graphics })))
+            }
+            "notice" => {
+                let text = line
+                    .trim_start()
+                    .strip_prefix("notice")
+                    .unwrap_or("")
+                    .trim();
+                self.system_message(horizon_client::text::Text::literal(text));
+                ok()
+            }
             "bench" => {
                 let seconds: f64 = arg(1)?.parse()?;
                 if self.pending_bench.is_some() {
@@ -971,6 +1098,38 @@ impl Game<'_> {
         self.save_game()
     }
 
+    pub(super) fn start_autotune(&mut self, target: f64) -> Result<()> {
+        if horizon_client::benchmark::autotune_running() {
+            return Err("an auto-tune is already running".into());
+        }
+        let sender = self
+            .control
+            .get_or_insert_with(horizon_client::control::Server::local)
+            .sender();
+        horizon_client::benchmark::autotune(sender, target, std::env::current_dir()?);
+        Ok(())
+    }
+
+    pub(super) fn start_precise_autotune(&mut self, target: f64, passes: usize) -> Result<()> {
+        if horizon_client::benchmark::autotune_running() {
+            return Err("an auto-tune is already running".into());
+        }
+        if self.remote.is_some() && self.integrated.is_none() {
+            return Err("the precise auto-tune needs a local world".into());
+        }
+        let sender = self
+            .control
+            .get_or_insert_with(horizon_client::control::Server::local)
+            .sender();
+        horizon_client::benchmark::precise_autotune(
+            sender,
+            target,
+            passes,
+            std::env::current_dir()?,
+        );
+        Ok(())
+    }
+
     fn require_world(&self) -> Result<()> {
         if self.title.is_some() {
             return Err("no world open; use: open WORLD [SEED] [creative]".into());
@@ -1089,6 +1248,7 @@ impl Game<'_> {
                 "position": [p.position.x, p.position.y, p.position.z],
                 "velocity": [p.velocity.x, p.velocity.y, p.velocity.z],
                 "on_ground": p.ground.on_ground,
+                "flying": p.flying,
                 "health": p.health.health(),
                 // The maximum the HUD's hearts last read (its cached value).
                 "max_health": p
@@ -1105,8 +1265,27 @@ impl Game<'_> {
         });
         let renderer = self.renderer.as_ref().map(|r| {
             let [arena_bytes, section_vertex_bytes] = r.section_vertex_bytes();
+            let arena_stats = r.arena_stats();
             // Device memory by the backend's allocator (Vulkan; absent elsewhere).
             let memory = r.device.generate_allocator_report();
+            let gpu_passes = r.gpu_pass_times().map(|(total, passes)| {
+                let list: Vec<_> = passes
+                    .iter()
+                    .map(|(name, ms)| json!({ "name": name, "ms": ms }))
+                    .collect();
+                let pixels = f64::from(r.config.width) * f64::from(r.config.height);
+                let world = r.gpu_world_statistics().map(|[vs, clip, tris, fs]| {
+                    json!({
+                        "vertex_invocations": vs,
+                        "clipper_invocations": clip,
+                        "clipper_primitives_out": tris,
+                        "fragment_invocations": fs,
+                        "fragments_per_pixel": f64::from(fs) / pixels,
+                    })
+                });
+                json!({ "total_ms": total, "passes": list, "terrain_phase1_statistics": world })
+            });
+            let latency = horizon_client::latency::snapshot();
             json!({
                 "gpu": r.info.name,
                 "vendor": vendor_name(r.info.vendor),
@@ -1121,13 +1300,35 @@ impl Game<'_> {
                 "backend": format!("{:?}", r.info.backend),
                 "size": [r.config.width, r.config.height],
                 "present_mode": format!("{:?}", r.config.present_mode),
+                "frame_latency": r.config.desired_maximum_frame_latency,
+                "input_latency_ms": json!({
+                    "samples": latency.samples,
+                    "present_avg": latency.submit_avg,
+                    "present_max": latency.submit_max,
+                    "gpu_avg": latency.gpu_avg,
+                    "gpu_max": latency.gpu_max,
+                }),
+                "gpu_passes": gpu_passes,
                 "drawn_sections": r.drawn_sections,
                 "section_draws": r.section_draws,
                 "section_draw_calls": r.section_draw_calls,
                 "culled_sections": r.culled_sections(),
+                "mesh_shaders": r.mesh_shaders(),
                 "uploaded_bytes": r.uploaded_bytes,
                 "resident_sections": r.resident_sections(),
                 "arena_bytes": arena_bytes,
+                "vertex_pool": r.vertex_pool(),
+                "hiz_occlusion": r.hiz_occlusion(),
+                "gpu_particles": r.particle_instancing(),
+                "shadow_indirect": r.shadow_indirect(),
+                "shadow_pass": r.shadow_pass(),
+                "texture_compression": r.texture_compression(),
+                "texture_compression_supported": r.texture_compression_supported(),
+                "offscreen": r.is_offscreen(),
+                "arena_pages": arena_stats.0,
+                "arena_creates": arena_stats.1,
+                "arena_grows": arena_stats.2,
+                "arena_slowest_alloc_ms": arena_stats.3,
                 "section_vertex_bytes": section_vertex_bytes,
                 "gpu_allocated_bytes": memory.as_ref().map(|m| m.total_allocated_bytes),
                 "gpu_reserved_bytes": memory.as_ref().map(|m| m.total_reserved_bytes),
@@ -1143,12 +1344,15 @@ impl Game<'_> {
         let lod = json!({
             "distance": self.settings.horizon.lod_distance,
             "effective_distance": self.lod_distance(),
+            "far_terrain_distance": self.settings.horizon.far_terrain_chunks(),
+            "view_radius": self.view_radius(),
             "terrain_distance": self.terrain_distance(),
             "source": if self.lod.is_none() { "none" } else if self.integrated.is_some() { "integrated" } else { "local" },
             "source_attempted": self.lod_source_attempted,
             "active_tiles": self.lod.as_ref().map_or(0, |lod| lod.stats().0),
             "cached_tiles": self.lod.as_ref().map_or(0, |lod| lod.stats().1),
             "far_detail": self.settings.horizon.far_detail.name(),
+            "far_lod_coarse": self.settings.horizon.far_lod_coarse(),
             "resident_quads": self.renderer.as_ref().map_or(0, |r| r.lod_quads()),
             "levels": self.renderer.as_ref().map_or_else(Vec::new, |r| r.lod_levels()),
             "pending_observations": self.lod_observe.len(),
@@ -1220,6 +1424,12 @@ impl Game<'_> {
                 .eye_position()
                 .map(|e| self.shown_name_tags(glam::DVec3::from_array(e))),
         });
+        status["optimization_mode"] = json!(self.settings.horizon.optimization_mode.name());
+        status["greedy_meshing"] = json!(horizon_client_render::mesher::greedy());
+        status["leaf_distance"] = json!({
+            "chunks": self.streaming.leaf_distance(),
+            "columns": self.streaming.leaf_columns(),
+        });
         status["lod"] = lod;
         let (target, sampled) = self.lod.as_ref().map_or((0, 0), |lod| lod.progress());
         status["lod"]["target_tiles"] = target.into();
@@ -1241,6 +1451,7 @@ impl Game<'_> {
         status["maps"] = json!(self.maps_status());
         // The particles made so far, by type.
         status["particles"] = json!(self.particles.made());
+        status["live_particles"] = json!(self.particles.len());
         // The pickup particles made so far, by what was taken.
         status["pickups"] = json!(self.pickups.made());
         // The world border this side knows of.

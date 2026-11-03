@@ -1524,6 +1524,12 @@ fn write_loop(
     let mut sent_at: Option<(i64, Instant)> = None;
     let mut next = Instant::now() + KEEP_ALIVE_EVERY;
     loop {
+        if writer
+            .set_batching(horizon_protocol::connection::coalescing())
+            .is_err()
+        {
+            break;
+        }
         let mut write = |body: Vec<u8>| {
             pending.fetch_sub(body.len(), Ordering::Relaxed);
             send_body(&mut writer, &body).is_ok() && pending.load(Ordering::Relaxed) <= MAX_PENDING
@@ -1542,6 +1548,7 @@ fn write_loop(
             Ok(Out::Disconnect(reason)) => {
                 let _ = writer
                     .send(&play::Clientbound::Disconnect(cfg::Disconnect { reason }).encode());
+                let _ = writer.flush();
                 std::thread::sleep(Duration::from_millis(50));
                 break;
             }
@@ -1569,6 +1576,9 @@ fn write_loop(
             }
             sent_at = Some((id, now));
             next = now + KEEP_ALIVE_EVERY;
+        }
+        if writer.flush().is_err() {
+            break;
         }
     }
     writer.shutdown();

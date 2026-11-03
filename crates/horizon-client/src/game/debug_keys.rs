@@ -894,6 +894,11 @@ impl Game<'_> {
             let min_y = self.world.bottom_y();
             g.chunk_borders(block, min_y, min_y + self.world.layout().height() - 1);
         }
+        if (self.settings.pvp.hitboxes || self.settings.pvp.projectile_trails)
+            && !self.debug_entry("entity_hitboxes")
+        {
+            self.pvp_hitboxes(alpha, &mut g);
+        }
         if !self.debug_entry("entity_hitboxes") {
             return g;
         }

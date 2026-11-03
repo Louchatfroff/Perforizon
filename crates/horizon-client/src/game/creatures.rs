@@ -28,6 +28,26 @@ use horizon_core::{
 };
 use std::sync::Arc;
 
+const DISTANT_MOB_SQ: f64 = 40.0 * 40.0;
+const DISTANT_MOB_ALPHA: f64 = 0.5;
+const DISTANT_MOB_SHIFT_SQ: f64 = 16.0 * 16.0;
+
+struct DistantMob {
+    tick: u64,
+    alpha: f64,
+    camera: glam::DVec3,
+    position: [f64; 3],
+    previous: [f64; 3],
+    used: u64,
+    vertices: Vec<Vertex>,
+}
+
+#[derive(Default)]
+pub(super) struct DistantMobs {
+    frame: u64,
+    entries: horizon_client::fast_hash::FxHashMap<u32, DistantMob>,
+}
+
 /// The world impact sound after successful arrow damage, including self-shots.
 /// `AbstractArrow.onHitEntity`'s damage: the crit bonus comes from the
 /// arrow's own random.
@@ -5899,6 +5919,9 @@ impl Game<'_> {
         let lookup = |name: &str| atlas.sprites.get(name).map(|r| [r.u0, r.v0, r.u1, r.v1]);
         let scale = self.view_scale();
         self.rendered_mobs.set(0);
+        let mut distant = self.distant_mobs.borrow_mut();
+        distant.frame += 1;
+        let frame = distant.frame;
         for mob in &self.mobs {
             let entity_start = out.len();
             let outline = self.mob_outline(mob);
@@ -5946,6 +5969,31 @@ impl Game<'_> {
             }
             self.mark_entity(entity_start, &mob.kind.id);
             self.rendered_mobs.set(self.rendered_mobs.get() + 1);
+            let reusable = !self.settings.horizon.exact_parity()
+                && !is_player
+                && outline.is_none()
+                && d.length_squared() > DISTANT_MOB_SQ
+                && horizon_client::mobs::guardian::beam(mob, alpha as f32).is_none();
+            if reusable
+                && let Some(e) = distant.entries.get_mut(&mob.id)
+                && e.tick == self.ticks
+                && e.position == [mob.position.x, mob.position.y, mob.position.z]
+                && e.previous == [mob.previous.x, mob.previous.y, mob.previous.z]
+                && alpha >= e.alpha
+                && alpha - e.alpha < DISTANT_MOB_ALPHA
+                && (e.camera - camera).length_squared() < DISTANT_MOB_SHIFT_SQ
+            {
+                e.used = frame;
+                let shift = (e.camera - camera).as_vec3();
+                out.extend(e.vertices.iter().map(|v| {
+                    let mut v = *v;
+                    v.pos[0] += shift.x;
+                    v.pos[1] += shift.y;
+                    v.pos[2] += shift.z;
+                    v
+                }));
+                continue;
+            }
             let light = self.world.light(
                 mob.position.x.floor() as i32,
                 (mob.position.y + mob.eye_height()).floor() as i32,
@@ -6074,7 +6122,28 @@ impl Game<'_> {
                     out,
                 );
             }
+            if reusable {
+                let entry = distant.entries.entry(mob.id).or_insert_with(|| DistantMob {
+                    tick: 0,
+                    alpha: 0.0,
+                    camera,
+                    position: [0.0; 3],
+                    previous: [0.0; 3],
+                    used: 0,
+                    vertices: Vec::new(),
+                });
+                entry.tick = self.ticks;
+                entry.alpha = alpha;
+                entry.camera = camera;
+                entry.position = [mob.position.x, mob.position.y, mob.position.z];
+                entry.previous = [mob.previous.x, mob.previous.y, mob.previous.z];
+                entry.used = frame;
+                entry.vertices.clear();
+                entry.vertices.extend_from_slice(&out[entity_start..]);
+            }
         }
+        distant.entries.retain(|_, e| e.used == frame);
+        drop(distant);
         self.elder_apparition_geometry(alpha, out);
         self.spawner_geometry(camera, alpha, out);
         // Projectiles: the baked vanilla arrow model, the rest as item billboards.

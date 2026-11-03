@@ -300,6 +300,11 @@ impl Game<'_> {
             on_fire: self.camera_type.first_person()
                 && !self.spectator()
                 && self.player.as_ref().is_some_and(|p| p.fire_ticks > 0),
+            fire_drop: if self.settings.pvp.low_fire {
+                (1.0 - self.settings.pvp.low_fire_height) * 0.5
+            } else {
+                0.0
+            },
             gui_overlays: &gui_overlays,
         })
     }
@@ -358,6 +363,13 @@ impl Game<'_> {
             );
         }
         self.particles.particle_level = self.settings.particles;
+        let pvp = &self.settings.pvp;
+        self.particles.filter = horizon_client::particles::ParticleFilter {
+            explosions: pvp.particle_filter && pvp.hide_explosion_particles,
+            potions: pvp.particle_filter && pvp.hide_potion_particles,
+            smoke: pvp.particle_filter && pvp.hide_smoke_particles,
+            crit_multiplier: pvp.crit_multiplier.clamp(1, 5) as u8,
+        };
         if let Some(e) = eye {
             self.particles.camera = e;
         }

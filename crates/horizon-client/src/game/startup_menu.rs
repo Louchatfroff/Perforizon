@@ -407,6 +407,7 @@ impl Loading {
         if let Some(renderer) = &mut self.renderer {
             renderer.gamma = self.settings.gamma;
             renderer.set_present_mode(self.settings.vsync, self.settings.horizon.present_mode);
+            renderer.set_frame_latency(self.settings.horizon.frame_latency);
         }
         horizon_client::hud::GUI_SCALE.store(self.settings.gui_scale, Ordering::Relaxed);
         super::narrator::sync(&self.settings);
@@ -585,7 +586,11 @@ impl Loading {
                 Event::NativeSettings(_) | Event::NativeButton(..) => {}
                 // The startup menu runs before the game opens a control socket,
                 // and before its sound engine (no clicks, no volume previews).
-                Event::ButtonClick | Event::CopyAgentDetails | Event::Volume(..) => {}
+                Event::ButtonClick
+                | Event::CopyAgentDetails
+                | Event::RunAutotune
+                | Event::RunPreciseAutotune
+                | Event::Volume(..) => {}
             }
         }
     }

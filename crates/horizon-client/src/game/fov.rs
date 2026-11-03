@@ -66,7 +66,15 @@ impl Game<'_> {
             flying: p.flying,
             walking_speed: WALKING_SPEED,
             // Player.aiStep keeps `speed` as the float movement speed attribute.
-            movement_speed: f64::from(p.speed),
+            movement_speed: {
+                let pvp = &self.settings.pvp;
+                let scale = if pvp.no_speed_fov {
+                    0.0
+                } else {
+                    pvp.sprint_fov_scale
+                };
+                f64::from(WALKING_SPEED + (p.speed - WALKING_SPEED) * scale)
+            },
             using,
         })
     }

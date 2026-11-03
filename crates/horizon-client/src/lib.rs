@@ -11,10 +11,10 @@ pub use horizon_client_render::{
     block_entity_render, border_render, breaking, brewing, camera, chat, chunk, chunk_map, clouds,
     collisions, command_block, containers, crash, datapack, dynamic_light, effects, environment,
     extras, fast_hash, fog, font, gfx, graphics, graphics_style, graphics_ui, hdr_calibration, hud,
-    hud_layout, hud_overlays, inventory_effects, java_text, jigsaw_block, level_loading, light,
-    lod, logging, menu_blur, mesher, minimap, mipmap, mod_list, model_library, models,
+    hud_layout, hud_overlays, inventory_effects, java_text, jigsaw_block, latency, level_loading,
+    light, lod, logging, menu_blur, mesher, minimap, mipmap, mod_list, model_library, models,
     multiline_edit, native_emissive, options_file, options_fixes, options_ui, overlay, pack_screen,
-    packs, par, particles, poi_sections, post_chain, potent_sulfur, preedit, providers,
+    packs, par, particles, poi_sections, post_chain, potent_sulfur, preedit, providers, pvp,
     screen_draw, screen_effects, sculk, section_mask, settings, shader_options, shader_pack_list,
     signs, skins, sound_engine, sound_events, sound_preview, spans, split_layout, split_profiles,
     sprites, streaming, structure_block, tab_list, telemetry, test_block, test_instance_block,
@@ -60,6 +60,7 @@ pub mod falling_block;
 pub mod fire_render;
 pub mod first_person;
 pub mod flatgen;
+pub mod frame_budget;
 pub mod friends_screen;
 pub mod furnace;
 pub mod game_mode_switcher;
@@ -106,6 +107,7 @@ pub mod recipe_book;
 pub mod recipe_book_screen;
 pub mod reconnect;
 pub mod save;
+pub mod scan_cache;
 pub mod scoreboard_cmd;
 pub mod screen_layout;
 pub mod screen_narrator;

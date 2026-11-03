@@ -7,6 +7,7 @@
 //! so reports from the two can be compared.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -15,6 +16,9 @@ use horizon_bench::{App, Frames, Kind, Report};
 use serde_json::Value;
 
 use crate::control::Request;
+
+mod precise;
+pub use precise::{cancel as cancel_precise, start as precise_autotune};
 
 pub const SEED: i64 = 1234;
 /// The world the benchmark creates under `saves/`, replaced on every run.
@@ -235,6 +239,16 @@ fn run(control: &Control, setup: Setup) -> Result<PathBuf, String> {
             &[frames.low_01pct_fps],
         );
         report.frames.push(frames);
+        let status = control.status();
+        for pass in status["renderer"]["gpu_passes"]["passes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            if let (Some(pass_name), Some(pass_ms)) = (pass["name"].as_str(), pass["ms"].as_f64()) {
+                report.metric(&format!("gpu_pass.{name}.{pass_name}"), &[pass_ms]);
+            }
+        }
     }
 
     let status = control.status();
@@ -433,9 +447,484 @@ impl RssSampler {
     }
 }
 
+const TUNE_SECONDS: f64 = 3.0;
+const TUNE_BUDGET: Duration = Duration::from_secs(110);
+const SETTLE_CAP: Duration = Duration::from_secs(12);
+const RELOAD_CAP: Duration = Duration::from_secs(90);
+type TuneStep = (&'static str, &'static [&'static str]);
+const TUNE_STEPS: [TuneStep; 7] = [
+    ("vertexPool", &["false", "true"]),
+    ("meshShaders", &["false", "true"]),
+    ("hizOcclusion", &["false", "true"]),
+    ("caveCulling", &["true", "false"]),
+    ("entityCulling", &["true", "false"]),
+    ("shadowCache", &["false", "true"]),
+    ("shadowIndirect", &["false", "true"]),
+];
+const LATENCY_TUNE_STEPS: [TuneStep; 2] = [
+    ("presentMode", &["auto", "mailbox"]),
+    ("frameLatency", &["0", "2"]),
+];
+const LATENCY_TIE: f64 = 0.97;
+fn is_latency_step(key: &str) -> bool {
+    LATENCY_TUNE_STEPS.iter().any(|s| s.0 == key)
+}
+fn lowest_latency_within_tie(scores: &[f64]) -> Option<usize> {
+    let best = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    scores.iter().position(|&s| s >= best * LATENCY_TIE)
+}
+const LOSSY_TUNE_STEPS: [TuneStep; 5] = [
+    ("textureCompression", &["false", "true"]),
+    ("greedyMeshing", &["true", "false"]),
+    ("binaryGreedy", &["false", "true"]),
+    ("gpuParticles", &["false", "true"]),
+    ("leafDistance", &["5", "3", "0"]),
+];
+const FAR_LOD_STEP: TuneStep = ("farLod", &["off", "16c", "10c"]);
+fn tune_steps(parity: bool) -> Vec<TuneStep> {
+    let by_name = |name: &str| {
+        *LOSSY_TUNE_STEPS
+            .iter()
+            .find(|s| s.0 == name)
+            .expect("a lossy step")
+    };
+    if parity {
+        return TUNE_STEPS
+            .iter()
+            .chain(&LATENCY_TUNE_STEPS)
+            .copied()
+            .collect();
+    }
+    let mut steps = vec![FAR_LOD_STEP, TUNE_STEPS[0]];
+    steps.extend(["greedyMeshing", "binaryGreedy", "leafDistance"].map(by_name));
+    steps.extend(&TUNE_STEPS[1..]);
+    steps.extend(["textureCompression", "gpuParticles"].map(by_name));
+    steps.extend(&LATENCY_TUNE_STEPS);
+    steps
+}
+const REMESH_KEYS: [&str; 6] = [
+    "vertexPool",
+    "greedyMeshing",
+    "binaryGreedy",
+    "meshShaders",
+    "leafDistance",
+    "farLod",
+];
+fn graphics_calls(key: &str, value: &str, status: &Value) -> Vec<String> {
+    match (key, value) {
+        ("farLod", "off") => vec![
+            format!(
+                "graphics farTerrainDistance {}",
+                status["lod"]["far_terrain_distance"].as_u64().unwrap_or(0)
+            ),
+            format!(
+                "graphics farLodCoarse {}",
+                status["lod"]["far_lod_coarse"].as_bool().unwrap_or(false)
+            ),
+        ],
+        ("farLod", chunks) => vec![
+            format!(
+                "graphics farTerrainDistance {}",
+                chunks.trim_end_matches('c')
+            ),
+            format!("graphics farLodCoarse {}", chunks.ends_with('c')),
+        ],
+        _ => vec![format!("graphics {key} {value}")],
+    }
+}
+const MANY_PARTICLES: u64 = 2000;
+fn many_particles(status: &Value) -> bool {
+    status["live_particles"].as_u64() >= Some(MANY_PARTICLES)
+}
+fn step_applies(key: &str, status: &Value) -> bool {
+    match key {
+        "textureCompression" => status["renderer"]["texture_compression_supported"] == true,
+        "shadowIndirect" => status["renderer"]["shadow_pass"] == true,
+        "gpuParticles" => many_particles(status),
+        "presentMode" | "frameLatency" => status["renderer"]["offscreen"] != true,
+        _ => true,
+    }
+}
+const TUNE_SCALES: [u32; 5] = [90, 80, 67, 60, 50];
+
+/// Tries the performance settings one at a time in the world the player is in, keeps what
+/// draws the most frames, then lowers the resolution scale until `target_fps` is met, and
+/// saves the result to the options; the steps are printed and written to `autotune.json`.
+pub fn autotune(requests: Sender<Request>, target_fps: f64, game_dir: PathBuf) {
+    if RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    thread::Builder::new()
+        .name("horizon-autotune".into())
+        .spawn(move || {
+            let control = Control(requests);
+            let before = control.status();
+            let _ = control.call("perf-mode on");
+            let done = tune(&control, target_fps, &game_dir);
+            let _ = control.call("perf-mode off");
+            restore(&control, &before);
+            RUNNING.store(false, Ordering::SeqCst);
+            match done {
+                Ok(()) => println!("Horizon: autotune done"),
+                Err(e) => eprintln!("Horizon: autotune failed: {e}"),
+            }
+        })
+        .expect("spawn the autotune thread");
+}
+
+static RUNNING: AtomicBool = AtomicBool::new(false);
+
+pub fn autotune_running() -> bool {
+    RUNNING.load(Ordering::SeqCst)
+}
+
+fn restore(control: &Control, before: &Value) {
+    let position: Vec<f64> = before["player"]["position"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_f64)
+        .collect();
+    if let [x, y, z] = position[..] {
+        let _ = control.call(&format!("tp {x} {y} {z}"));
+    }
+    if let (Some(yaw), Some(pitch)) = (before["yaw"].as_f64(), before["pitch"].as_f64()) {
+        let _ = control.call(&format!("look {yaw} {pitch}"));
+    }
+    if let Some(flying) = before["player"]["flying"].as_bool() {
+        let _ = control.call(&format!("flying {}", if flying { "on" } else { "off" }));
+    }
+}
+
+fn settle(control: &Control, cap: Duration) {
+    let deadline = Instant::now() + cap;
+    let mut quiet = 0;
+    while quiet < 3 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(500));
+        let s = control.status();
+        let tiles_ready =
+            s["lod"]["sampled_target_tiles"].as_u64() >= s["lod"]["target_tiles"].as_u64();
+        quiet = if s["pending_chunks"] == 0 && tiles_ready {
+            quiet + 1
+        } else {
+            0
+        };
+    }
+}
+
+fn wait_reload(control: &Control, key: &str, value: &str) {
+    if key != "textureCompression" {
+        return;
+    }
+    let on = value == "true";
+    let deadline = Instant::now() + RELOAD_CAP;
+    while Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(500));
+        if control.status()["renderer"]["texture_compression"].as_bool() == Some(on) {
+            break;
+        }
+    }
+    settle(control, SETTLE_CAP);
+}
+
+fn tune_scales(parity: bool) -> &'static [u32] {
+    if parity { &[] } else { &TUNE_SCALES }
+}
+
+fn tune(control: &Control, target_fps: f64, game_dir: &Path) -> Result<(), String> {
+    let status = control.status();
+    let parity = status["optimization_mode"].as_str() == Some("parity");
+    let notice = |line: String| {
+        let _ = control.call(&format!("notice Auto-tune: {line}"));
+    };
+    notice(if parity {
+        "started (Exact parity: pixel-changing options stay off)".into()
+    } else {
+        "started".into()
+    });
+    let position: Vec<f64> = status["player"]["position"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_f64)
+        .collect();
+    let [x, y, z] = position[..] else {
+        return Err("no player position".into());
+    };
+    let pitch = status["pitch"].as_f64().unwrap_or(10.0);
+    let yaw = status["yaw"].as_f64().unwrap_or(0.0);
+    let measure = |label: &str| -> Result<(f64, f64), String> {
+        thread::sleep(Duration::from_millis(1500));
+        control.call(&format!("tp {x} {y} {z}"))?;
+        control.call(&format!("look {yaw} {pitch}"))?;
+        let flight = control.call(&format!(
+            "fly {x} {y} {z} {x} {y} {} {TUNE_SECONDS} {pitch} raw",
+            z + 48.0
+        ))?;
+        let frame_ms: Vec<f32> = flight["frame_ms"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_f64)
+            .map(|v| v as f32)
+            .collect();
+        let frames = Frames::of(label, 0, &frame_ms, &[], &[]).ok_or("no frames drawn")?;
+        let result = (frames.avg_fps, frames.low_1pct_fps);
+        println!(
+            "Horizon: autotune {label}: {:.0} fps, 1% low {:.0}",
+            result.0, result.1
+        );
+        Ok(result)
+    };
+    let score = |(avg, low): (f64, f64)| avg * 0.5 + low * 0.5;
+    let mut tries = Vec::new();
+    settle(control, Duration::from_secs(60));
+    let began = Instant::now();
+    let mut best = measure("start")?;
+    tries.push(serde_json::json!({"step": "start", "avg": best.0, "low": best.1}));
+    let mut kept = Vec::new();
+    for (key, values) in tune_steps(parity) {
+        if !step_applies(key, &status) {
+            continue;
+        }
+        let mut chosen = None;
+        let mut measured = Vec::new();
+        let mut last = "";
+        for &value in values {
+            if began.elapsed() > TUNE_BUDGET {
+                break;
+            }
+            last = value;
+            for call in graphics_calls(key, value, &status) {
+                control.call(&call)?;
+            }
+            wait_reload(control, key, value);
+            if REMESH_KEYS.contains(&key) {
+                settle(control, SETTLE_CAP);
+            }
+            let result = measure(&format!("{key}={value}"))?;
+            tries.push(serde_json::json!({"step": format!("{key}={value}"), "avg": result.0, "low": result.1}));
+            measured.push((value, result));
+            if chosen.is_none_or(|(_, r)| score(result) > score(r) * 1.03) {
+                chosen = Some((value, result));
+            }
+        }
+        if is_latency_step(key) {
+            let scores: Vec<f64> = measured.iter().map(|&(_, r)| score(r)).collect();
+            chosen = lowest_latency_within_tie(&scores).map(|i| measured[i]);
+        }
+        if let Some((value, result)) = chosen {
+            for call in graphics_calls(key, value, &status) {
+                control.call(&call)?;
+            }
+            if value != last {
+                wait_reload(control, key, value);
+            }
+            if value != last && REMESH_KEYS.contains(&key) {
+                settle(control, SETTLE_CAP);
+            }
+            best = result;
+            kept.push(format!("{key}={value}"));
+            notice(format!("{key} {value}, {:.0} fps", best.0));
+        }
+    }
+    for scale in tune_scales(parity) {
+        if began.elapsed() > TUNE_BUDGET || (best.0 >= target_fps && best.1 >= target_fps * 0.5) {
+            break;
+        }
+        control.call(&format!("graphics resolutionScale {scale}"))?;
+        best = measure(&format!("resolutionScale={scale}"))?;
+        tries.push(serde_json::json!({"step": format!("resolutionScale={scale}"), "avg": best.0, "low": best.1}));
+    }
+    control.call("graphics-save")?;
+    notice(format!(
+        "done in {:.0}s, {:.0} fps (1% low {:.0}); kept {}",
+        began.elapsed().as_secs_f64(),
+        best.0,
+        best.1,
+        kept.join(", ")
+    ));
+    let report = serde_json::json!({"target_fps": target_fps, "final": {"avg": best.0, "low": best.1}, "kept": kept, "seconds": began.elapsed().as_secs_f64(), "tries": tries});
+    std::fs::write(
+        game_dir.join("autotune.json"),
+        serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parity_mode_never_tries_pixel_changing_options() {
+        let keys = |parity| -> Vec<&str> { tune_steps(parity).iter().map(|s| s.0).collect() };
+        assert!(!keys(true).contains(&"greedyMeshing"));
+        assert!(keys(false).contains(&"greedyMeshing"));
+        assert!(!keys(true).contains(&"leafDistance"));
+        assert!(keys(false).contains(&"leafDistance"));
+        assert_eq!(keys(false).len(), keys(true).len() + 6);
+    }
+
+    #[test]
+    fn gpu_particles_is_a_pixel_changing_candidate_tried_only_with_many_particles() {
+        let steps = tune_steps(false);
+        let step = steps.iter().find(|s| s.0 == "gpuParticles").unwrap();
+        assert_eq!(step.1, &["false", "true"]);
+        assert!(!tune_steps(true).iter().any(|s| s.0 == "gpuParticles"));
+        assert!(!REMESH_KEYS.contains(&"gpuParticles"));
+        let few = serde_json::json!({"live_particles": 1999});
+        let many = serde_json::json!({"live_particles": 2000});
+        assert!(!many_particles(&few));
+        assert!(many_particles(&many));
+        assert!(!many_particles(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn texture_compression_is_a_pixel_changing_candidate_with_off_as_baseline() {
+        let steps = tune_steps(false);
+        let step = steps.iter().find(|s| s.0 == "textureCompression").unwrap();
+        assert_eq!(step.1, &["false", "true"]);
+        assert!(!tune_steps(true).iter().any(|s| s.0 == "textureCompression"));
+    }
+
+    #[test]
+    fn vertex_pool_is_tried_in_both_modes_with_off_as_baseline_and_settles() {
+        for parity in [true, false] {
+            let steps = tune_steps(parity);
+            let step = steps.iter().find(|s| s.0 == "vertexPool").unwrap();
+            assert_eq!(step.1, &["false", "true"]);
+        }
+        assert!(REMESH_KEYS.contains(&"vertexPool"));
+    }
+
+    #[test]
+    fn hiz_occlusion_is_tried_in_both_modes_with_off_as_baseline_without_remeshing() {
+        for parity in [true, false] {
+            let steps = tune_steps(parity);
+            let step = steps.iter().find(|s| s.0 == "hizOcclusion").unwrap();
+            assert_eq!(step.1, &["false", "true"]);
+        }
+        assert!(!REMESH_KEYS.contains(&"hizOcclusion"));
+    }
+
+    #[test]
+    fn shadow_indirect_is_tried_in_both_modes_with_off_as_baseline_without_remeshing() {
+        for parity in [true, false] {
+            let steps = tune_steps(parity);
+            let step = steps.iter().find(|s| s.0 == "shadowIndirect").unwrap();
+            assert_eq!(step.1, &["false", "true"]);
+        }
+        assert!(!REMESH_KEYS.contains(&"shadowIndirect"));
+    }
+
+    #[test]
+    fn binary_greedy_is_tried_right_after_greedy_meshing_with_off_as_baseline() {
+        let steps = tune_steps(false);
+        let greedy = steps.iter().position(|s| s.0 == "greedyMeshing").unwrap();
+        assert_eq!(steps[greedy + 1], ("binaryGreedy", &["false", "true"][..]));
+        assert!(!tune_steps(true).iter().any(|s| s.0 == "binaryGreedy"));
+    }
+
+    #[test]
+    fn latency_steps_run_in_parity_mode_with_the_lowest_latency_value_first() {
+        for parity in [true, false] {
+            let steps = tune_steps(parity);
+            for (key, values) in LATENCY_TUNE_STEPS {
+                assert!(steps.iter().any(|s| s.0 == key));
+                assert!(is_latency_step(key));
+                assert!(!REMESH_KEYS.contains(&key));
+                assert!(values.len() >= 2);
+            }
+        }
+        assert_eq!(LATENCY_TUNE_STEPS[0].1[0], "auto");
+        assert_eq!(LATENCY_TUNE_STEPS[1].1[0], "0");
+        assert!(!is_latency_step("shadowCache"));
+    }
+
+    #[test]
+    fn equal_frame_rates_keep_the_lower_latency_candidate() {
+        assert_eq!(lowest_latency_within_tie(&[1000.0, 1010.0]), Some(0));
+        assert_eq!(lowest_latency_within_tie(&[1000.0, 1029.0]), Some(0));
+        assert_eq!(lowest_latency_within_tie(&[1000.0, 1040.0]), Some(1));
+        assert_eq!(lowest_latency_within_tie(&[900.0, 1100.0, 1090.0]), Some(1));
+        assert_eq!(lowest_latency_within_tie(&[]), None);
+    }
+
+    #[test]
+    fn every_pixel_changing_mesh_option_remeshes_before_measuring() {
+        assert!(REMESH_KEYS.contains(&"leafDistance"));
+        assert!(REMESH_KEYS.contains(&"binaryGreedy"));
+        let (_, values) = LOSSY_TUNE_STEPS
+            .iter()
+            .find(|s| s.0 == "leafDistance")
+            .unwrap();
+        assert_eq!(values[0], "5");
+    }
+
+    #[test]
+    fn far_lod_is_a_pixel_changing_candidate_with_off_as_baseline_and_remeshes() {
+        let steps = tune_steps(false);
+        let step = steps.iter().find(|s| s.0 == "farLod").unwrap();
+        assert_eq!(step.1, &["off", "16c", "10c"]);
+        assert!(REMESH_KEYS.contains(&"farLod"));
+        assert!(!tune_steps(true).iter().any(|s| s.0 == "farLod"));
+        assert_eq!(steps[0].0, "farLod");
+    }
+
+    #[test]
+    fn far_lod_baseline_keeps_the_players_setting_and_latency_skips_offscreen() {
+        let live = serde_json::json!({"lod": {"far_terrain_distance": 24, "far_lod_coarse": true}});
+        assert_eq!(
+            graphics_calls("farLod", "off", &live),
+            [
+                "graphics farTerrainDistance 24",
+                "graphics farLodCoarse true"
+            ]
+        );
+        let off = serde_json::json!({"renderer": {"offscreen": true}});
+        let on = serde_json::json!({"renderer": {"offscreen": false}});
+        for key in ["presentMode", "frameLatency"] {
+            assert!(!step_applies(key, &off));
+            assert!(step_applies(key, &on));
+        }
+        assert!(step_applies("vertexPool", &off));
+    }
+
+    #[test]
+    fn far_lod_values_expand_to_the_two_options_and_other_keys_pass_through() {
+        assert_eq!(
+            graphics_calls("farLod", "off", &Value::Null),
+            [
+                "graphics farTerrainDistance 0",
+                "graphics farLodCoarse false"
+            ]
+        );
+        assert_eq!(
+            graphics_calls("farLod", "16", &Value::Null),
+            [
+                "graphics farTerrainDistance 16",
+                "graphics farLodCoarse false"
+            ]
+        );
+        assert_eq!(
+            graphics_calls("farLod", "16c", &Value::Null),
+            [
+                "graphics farTerrainDistance 16",
+                "graphics farLodCoarse true"
+            ]
+        );
+        assert_eq!(
+            graphics_calls("vertexPool", "true", &Value::Null),
+            ["graphics vertexPool true"]
+        );
+    }
+
+    #[test]
+    fn parity_mode_never_lowers_the_resolution_scale() {
+        assert!(tune_scales(true).is_empty());
+        assert!(!tune_scales(false).is_empty());
+    }
 
     #[test]
     fn scenarios() {
