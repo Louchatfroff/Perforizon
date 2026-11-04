@@ -38,6 +38,7 @@ TRAILER="Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 say() { echo "upstream-sync: $*"; }
 summary() { if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; fi; }
 output() { if [ -n "${GITHUB_OUTPUT:-}" ]; then echo "$1=$2" >> "$GITHUB_OUTPUT"; fi; }
+REPO="${GITHUB_REPOSITORY:-$(git remote get-url origin 2>/dev/null | sed -E 's#^.*github.com[:/]##; s#\.git$##')}"
 have_gh() { [ "$PUSH" = 1 ] && command -v gh >/dev/null 2>&1; }
 
 git config user.name >/dev/null 2>&1 || git config user.name "github-actions[bot]"
@@ -101,15 +102,14 @@ if ! git merge --no-commit --no-ff upstream/main >"$LOGS/merge.log" 2>&1; then
   [ -n "$FILES" ] || FILES="(none listed; git said: $(tail -n 3 "$LOGS/merge.log"))"
   BODY="$(printf 'Merging upstream Horizon `%s` into `%s` conflicts. Nothing was pushed to main.\n\nUpstream range: `%s`\n\nConflicted files:\n\n```\n%s\n```\n\nResolve by hand: see docs/perforizon-sync.md (section "Blocked sync"). Close this issue once resolved.' "$SHORT" "$BASE" "$RANGE" "$FILES")"
   if have_gh; then
-    gh label create upstream-sync --color ededed --description "Automatic upstream Horizon sync" >/dev/null 2>&1 || true
-    NUM="$(gh issue list --label upstream-sync --state open --search 'in:title "Upstream sync blocked: conflicts"' --json number --jq '.[0].number // empty')"
+    gh api -X POST "repos/$REPO/labels" -f name=upstream-sync -f color=ededed -f description="Automatic upstream Horizon sync" >/dev/null 2>&1 || true
+    TITLE="Upstream sync blocked: conflicts"
+    NUM="$(gh api "repos/$REPO/issues?labels=upstream-sync&state=open&per_page=100" --jq "[.[] | select(.pull_request == null and .title == \"$TITLE\")][0].number // empty" || true)"
     if [ -n "$NUM" ]; then
-      gh issue view "$NUM" --json body --jq .body | grep -q "$SHORT" || gh issue edit "$NUM" --body "$BODY" >/dev/null
+      gh api "repos/$REPO/issues/$NUM" --jq .body | grep -q "$SHORT" || gh api -X PATCH "repos/$REPO/issues/$NUM" -f body="$BODY" >/dev/null
       say "issue #$NUM updated"
     else
-      gh issue create --title "Upstream sync blocked: conflicts" --label upstream-sync --body "$BODY" >/dev/null \
-        || gh issue create --title "Upstream sync blocked: conflicts" --body "$BODY" >/dev/null \
-        || say "could not open the issue"
+      gh api -X POST "repos/$REPO/issues" -f title="$TITLE" -f body="$BODY" -f "labels[]=upstream-sync" >/dev/null         || gh api -X POST "repos/$REPO/issues" -f title="$TITLE" -f body="$BODY" >/dev/null         || say "could not open the issue"
       say "issue opened"
     fi
   fi
@@ -209,13 +209,16 @@ echo "$TABLE"
 BODY="$(printf 'Merging upstream Horizon `%s` into `%s` is clean but these checks failed: **%s**. Main was not touched.\n\n%s\n\n```\n%s\n```\n\nFix on this branch, then merge. See docs/perforizon-sync.md.\n\nOpened by the upstream-sync workflow.' "$SHORT" "$BASE" "${FAILED[*]}" "$TABLE" "$(tail -c 12000 "$LOGS/failures.txt")")"
 if have_gh; then
   git push --force origin "$BRANCH"
-  OLD="$(gh pr list --state open --search 'in:title "Upstream sync: checks failed"' --json number,headRefName --jq ".[] | select(.headRefName != \"$BRANCH\" and (.headRefName|startswith(\"sync/upstream-\"))) | .number")"
-  for n in $OLD; do gh pr close "$n" --comment "Superseded by $BRANCH." >/dev/null || true; done
-  NUM="$(gh pr list --state open --head "$BRANCH" --json number --jq '.[0].number // empty')"
+  OLD="$(gh api "repos/$REPO/pulls?state=open&per_page=100" --jq ".[] | select(.head.ref != \"$BRANCH\" and (.head.ref | startswith(\"sync/upstream-\"))) | .number" || true)"
+  for n in $OLD; do
+    gh api -X POST "repos/$REPO/issues/$n/comments" -f body="Superseded by $BRANCH." >/dev/null || true
+    gh api -X PATCH "repos/$REPO/pulls/$n" -f state=closed >/dev/null || true
+  done
+  NUM="$(gh api "repos/$REPO/pulls?state=open&head=${REPO%%/*}:$BRANCH" --jq '.[0].number // empty' || true)"
   if [ -n "$NUM" ]; then
-    gh pr edit "$NUM" --body "$BODY" >/dev/null
+    gh api -X PATCH "repos/$REPO/pulls/$NUM" -f body="$BODY" >/dev/null
   else
-    gh pr create --base "$BASE" --head "$BRANCH" --title "Upstream sync: checks failed" --body "$BODY" >/dev/null || say "could not open the PR"
+    gh api -X POST "repos/$REPO/pulls" -f title="Upstream sync: checks failed" -f head="$BRANCH" -f base="$BASE" -f body="$BODY" >/dev/null || say "could not open the PR"
   fi
 elif [ "$PUSH" = 0 ]; then
   say "dry run: would push $BRANCH and open a PR; branch kept locally"
