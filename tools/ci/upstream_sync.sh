@@ -107,7 +107,9 @@ if ! git merge --no-commit --no-ff upstream/main >"$LOGS/merge.log" 2>&1; then
       gh issue view "$NUM" --json body --jq .body | grep -q "$SHORT" || gh issue edit "$NUM" --body "$BODY" >/dev/null
       say "issue #$NUM updated"
     else
-      gh issue create --title "Upstream sync blocked: conflicts" --label upstream-sync --body "$BODY" >/dev/null \n        || gh issue create --title "Upstream sync blocked: conflicts" --body "$BODY" >/dev/null \n        || say "could not open the issue"
+      gh issue create --title "Upstream sync blocked: conflicts" --label upstream-sync --body "$BODY" >/dev/null \
+        || gh issue create --title "Upstream sync blocked: conflicts" --body "$BODY" >/dev/null \
+        || say "could not open the issue"
       say "issue opened"
     fi
   fi
