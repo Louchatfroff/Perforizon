@@ -5789,13 +5789,15 @@ impl Game<'_> {
             // ShulkerBoxBlock.canOpen: the lid has no room; nothing opens.
         } else if let Some(entity) = BlockEntity::for_block(&name) {
             self.world.block_entities.get_or_insert_with(key, || entity);
-            self.unpack_opened_loot(key, &name);
+            horizon_client::spans::time("open_loot", || self.unpack_opened_loot(key, &name));
             let centre = [
                 f64::from(key.0) + 0.5,
                 f64::from(key.1) + 0.5,
                 f64::from(key.2) + 0.5,
             ];
-            self.resolve_container_maps(key, centre);
+            horizon_client::spans::time("open_maps", || {
+                self.resolve_container_maps(key, centre);
+            });
             self.container = Some(key);
             let first = self.container_opener_event(key, true);
             if first {
@@ -6445,9 +6447,13 @@ impl Game<'_> {
         let mut anchor_passed = false;
         // Native mods, where ServerPlayerGameMode.useItemOn starts: a
         // canceled click does nothing (a guest's block is sent back).
+        // A slow tick's line names the phase of a use that took it (#8669): the mods' hook,
+        // the block's own use, then the item's.
         if let Some(hit) = block_hit {
             let mut canceled = false;
-            self.native_right_click_block(hit.pos, hit.face, &mut canceled);
+            horizon_client::spans::time("use_mods", || {
+                self.native_right_click_block(hit.pos, hit.face, &mut canceled);
+            });
             if canceled {
                 // Nothing was used, so nothing consumed the action.
                 self.use_failed = true;
@@ -6455,6 +6461,7 @@ impl Game<'_> {
             }
         }
         // MultiPlayerGameMode.useItemOn: blocks react first.
+        let block_phase = horizon_client::spans::guard("use_block");
         if !(sneaking && hands_full)
             && let Some(hit) = block_hit
         {
@@ -6637,6 +6644,8 @@ impl Game<'_> {
                 }
             }
         }
+        drop(block_phase);
+        let _item_phase = horizon_client::spans::guard("use_item");
         let Some(stack) = self.held().cloned() else {
             return Ok(false);
         };
@@ -12907,11 +12916,14 @@ impl Game<'_> {
                         });
                     }
                 } else if !first && !self.res.facts().is_air(state) && f.fluid == Fluid::None {
-                    return Some(Hit {
-                        pos: b,
-                        face,
-                        point: p,
-                    });
+                    // `ClipContext.Block.OUTLINE`: the ray stops at the block's
+                    // outline, not its cell; it passes through the empty part
+                    // of a torch, a fence or a flower to the water behind.
+                    if let Some(hit) =
+                        outline_stop(origin, dir, self.reach(), b, face, || self.outline_boxes(b))
+                    {
+                        return Some(hit);
+                    }
                 }
                 last = b;
                 first = false;
@@ -21814,6 +21826,23 @@ fn container_key_clones(button: MouseButton, action: KeyAction) -> bool {
     button == MouseButton::Middle && action != KeyAction::Release
 }
 
+/// Where a ray entering `pos` first meets the block's outline boxes, if it
+/// does: a hollow block (torch, fence, flower) lets the ray through.
+fn outline_stop(
+    origin: [f64; 3],
+    dir: [f64; 3],
+    reach: f64,
+    pos: [i32; 3],
+    face: [i32; 3],
+    boxes: impl FnOnce() -> Vec<[f64; 6]>,
+) -> Option<Hit> {
+    let (t, face) = interaction_shapes::entry(origin, dir, &boxes(), reach, face)?;
+    Some(Hit {
+        pos,
+        face,
+        point: std::array::from_fn(|i| origin[i] + dir[i] * t),
+    })
+}
 /// `VoxelShape.clip` of a fluid source's shape for a ray that starts in the
 /// source's own block `cell`: the face and point it hits, in `pick_fluid`'s
 /// `Hit` terms. `FlowingFluid.getShape` is the whole block under the same
@@ -22064,6 +22093,24 @@ mod tests {
 
     use super::*;
     use horizon_client::container_screen::{Button, Clicks, Release, Target};
+
+    /// `ClipContext.Block.OUTLINE` for the SOURCE_ONLY ray (#8180): a ray
+    /// through the empty part of a torch's cell is not stopped by it.
+    #[test]
+    fn the_fluid_ray_passes_through_the_hollow_of_a_torch() {
+        // A torch: a 2x10x2 pillar in the middle of its cell, at (0, 0, 0).
+        let torch = || vec![[0.4375, 0.0, 0.4375, 0.5625, 0.625, 0.5625]];
+        let dir = [0.0, 0.0, 1.0];
+        // Beside the pillar: no hit, the ray goes on to the water behind.
+        assert!(outline_stop([0.1, 0.3, -1.0], dir, 5.0, [0, 0, 0], [0, 0, -1], torch).is_none());
+        // Above the pillar (a torch is 10/16 tall): no hit either.
+        assert!(outline_stop([0.5, 0.8, -1.0], dir, 5.0, [0, 0, 0], [0, 0, -1], torch).is_none());
+        // Through the pillar: stopped on its front face, not at the cell's edge.
+        let hit = outline_stop([0.5, 0.3, -1.0], dir, 5.0, [0, 0, 0], [0, 0, -1], torch)
+            .expect("the pillar stops the ray");
+        assert_eq!(hit.face, [0, 0, -1]);
+        assert!((hit.point[2] - 0.4375).abs() < 1e-9);
+    }
 
     #[test]
     fn a_death_drops_the_off_hand_before_the_armour() {

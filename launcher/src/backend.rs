@@ -3726,7 +3726,7 @@ pub fn {f}("
 
     /// A preparation that reuses the imported game files still reads the assets from the
     /// launcher that has them: a Prism Launcher instance's are in the launcher root, linked into
-    /// the official layout (jan.sonki on Discord: silent, grey title screen since 0.2.48).
+    /// the official layout (jan.sonki: silent, grey title screen since 0.2.48).
     #[test]
     fn reused_imports_take_the_assets_from_the_launcher_that_has_them() {
         let dir =

@@ -15,7 +15,12 @@ const NEOFORGE: &[u8] = include_bytes!("../assets/logos/neoforge.png");
 /// sites into the image cache, never shipped.
 const FABRIC: &str = "https://raw.githubusercontent.com/FabricMC/fabric-loader/master/src/main/resources/assets/fabricloader/icon.png";
 const FORGE: &str = "https://files.minecraftforge.net/static/images/favicon-32x32.png";
+pub(super) const GRASS: &[u8] = include_bytes!("../assets/logos/grass-block.png");
 impl Launcher {
+    pub(super) fn grass_mark(&mut self, size: f32) -> Option<Arc<RenderImage>> {
+        self.icon_image("mark:grass".into(), size, false, || Some(GRASS.to_vec()))
+    }
+
     /// A mod loader's logo by its id (`fabric`, `quilt`, `forge`, `neoforge`): None while a
     /// fetched one is on its way, or for another id.
     pub(super) fn loader_logo(&mut self, loader: &str, size: f32) -> Option<Arc<RenderImage>> {

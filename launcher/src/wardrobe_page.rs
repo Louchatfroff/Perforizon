@@ -17,19 +17,22 @@ use horizon_launcher::wardrobe::{Catalogue, Change, ClaimState, Error, Saved, Se
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod shop;
+pub(super) use shop::Shop;
+
 /// The still picture's size, in points.
 const W: f32 = 180.;
 const H: f32 = 264.;
 /// How long a line like "Equipped Sunlet." stays.
 const TOAST: Duration = Duration::from_secs(4);
 
-/// The slots a row each, with their names. Themes are the launcher's own; name tags have no model.
+/// The slots a row each, with their names. Name tags have no model.
 const SLOTS: [(&str, &str); 5] = [
     ("head", "Head"),
     ("back", "Back"),
+    ("torso", "Shirt"),
     ("shoulder", "Shoulder pet"),
     ("name_tag", "Name tag"),
-    ("theme", "Launcher theme"),
 ];
 
 /// Where the service stands, as the page tells it.
@@ -273,7 +276,7 @@ impl Launcher {
             .map(|m| &m.claim)
             .or(self.shop_kept.as_ref());
         horizon_launcher::shop::in_top_bar(
-            horizon_cosmetics::enabled(),
+            horizon_cosmetics::forced(),
             self.shop_status.as_ref(),
             own,
         )
@@ -488,10 +491,17 @@ impl Launcher {
             .flatten()
             .filter_map(|e| Item::parse(&std::fs::read(e.path()).ok()?).ok())
             .collect();
-        items.sort_by(|a, b| a.id.cmp(&b.id));
+        let order = |i: &Item| {
+            use horizon_cosmetics::Slot::*;
+            [Head, Torso, Back, Shoulder, NameTag]
+                .iter()
+                .position(|s| *s == i.slot)
+        };
+        items.sort_by(|a, b| order(a).cmp(&order(b)).then(a.id.cmp(&b.id)));
         let slot = |i: &Item| match i.slot {
             horizon_cosmetics::Slot::Head => "head",
             horizon_cosmetics::Slot::Back => "back",
+            horizon_cosmetics::Slot::Torso => "torso",
             horizon_cosmetics::Slot::Shoulder => "shoulder",
             horizon_cosmetics::Slot::NameTag => "name_tag",
         };
@@ -502,25 +512,7 @@ impl Launcher {
                 .entry(slot(i).to_owned())
                 .or_insert_with(|| i.id.clone());
         }
-        let mut ids: Vec<String> = items.iter().map(|i| i.id.clone()).collect();
-        // A launcher theme to wear: the design brief's First Light.
-        let dawn = Entry {
-            id: "first_light".into(),
-            hash: String::new(),
-            slot: "theme".into(),
-            names: [("en_us".to_owned(), "First Light".to_owned())].into(),
-            theme: Some(horizon_launcher::wardrobe::Theme {
-                sky: [
-                    "#0b1030", "#1d2a63", "#3d4c94", "#7f78c0", "#e2a0b0", "#ffd6a0",
-                ]
-                .map(String::from),
-                accent_hue: 246.,
-            }),
-        };
-        ids.push(dawn.id.clone());
-        if state == "theme" {
-            equipped.insert("theme".to_owned(), dawn.id.clone());
-        }
+        let ids: Vec<String> = items.iter().map(|i| i.id.clone()).collect();
         let claim = Claim {
             state: if state == "closed" {
                 ClaimState::Closed
@@ -544,8 +536,8 @@ impl Launcher {
                     slot: slot(i).to_owned(),
                     names: [("en_us".to_owned(), title_case(&i.id))].into(),
                     theme: None,
+                    lines: Default::default(),
                 })
-                .chain([dawn])
                 .collect(),
             claim: claim.clone(),
         };
@@ -600,6 +592,9 @@ impl Launcher {
             toast: None,
         });
         self.wardrobe_reload = false;
+        if let Ok(state) = std::env::var("HORIZON_SHOP_STATE") {
+            self.shop_preview(&state);
+        }
     }
 
     /// The account's skin wearing what it wears now, baked once per change.
@@ -628,7 +623,7 @@ impl Launcher {
         draws.extend(
             worn.iter()
                 .filter_map(|id| w.items.get(id))
-                .filter_map(|item| preview::Draw::item(item, &body, 0.0)),
+                .flat_map(|item| preview::Draw::item(item, &body, 0.0)),
         );
         let (pw, ph) = ((W * scale) as u32, (H * scale) as u32);
         // Degrees: a little turned, then a quarter more per click.
@@ -649,14 +644,29 @@ impl Launcher {
 
     pub(super) fn wardrobe_page(&mut self, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
+        let signed_out = self.wardrobe.is_none() && self.wardrobe_account().is_none();
+        let reload = std::mem::take(&mut self.wardrobe_reload);
+        self.shop_visit(reload, signed_out, cx);
+        if !signed_out && (reload || self.wardrobe.is_none()) {
+            self.open_wardrobe(cx);
+        }
+        let tabs = match self.shop_tabs(cx) {
+            Some(tabs) if self.shop.open => return self.shop_page(tabs, cx),
+            tabs => tabs,
+        };
         let header = page_header(
             "Wardrobe",
             "What you wear in every Horizon world and server. Changes reach other players the next \
              time they see you.",
             &t,
         );
-        let page = div().flex().flex_col().gap(px(24.)).child(header);
-        if self.wardrobe.is_none() && self.wardrobe_account().is_none() {
+        let page = div()
+            .flex()
+            .flex_col()
+            .gap(px(24.))
+            .children(tabs)
+            .child(header);
+        if signed_out {
             let sign_in = button(
                 "wardrobe-sign-in",
                 "Sign in with Microsoft",
@@ -682,9 +692,6 @@ impl Launcher {
                     )
                     .child(sign_in),
             );
-        }
-        if std::mem::take(&mut self.wardrobe_reload) || self.wardrobe.is_none() {
-            self.open_wardrobe(cx);
         }
         let picture = self.wardrobe_picture();
         let Some(w) = self.wardrobe.as_ref() else {
