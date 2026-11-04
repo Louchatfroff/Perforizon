@@ -67,7 +67,32 @@ if [ "$PUSH" = 1 ] && [ "${SYNC_FORCE:-0}" != 1 ] && git ls-remote --exit-code -
 fi
 
 git checkout --quiet -B "$BRANCH" "$BASE"
+# Conflicts that are the same every time are settled here: README.md stays ours, language files are merged key by key
+# (our removals and additions kept, upstream's new keys taken), and files the terminal-style launcher deleted on purpose
+# stay deleted. Anything else is a real conflict.
+auto_resolve() {
+  local f
+  if git diff --name-only --diff-filter=U | grep -qx README.md; then
+    git checkout --ours -- README.md && git add README.md
+  fi
+  local langs
+  langs="$(git diff --name-only --diff-filter=U -- 'launcher/lang/*.json' || true)"
+  if [ -n "$langs" ]; then
+    # shellcheck disable=SC2086
+    "$PY" tools/ci/merge_lang.py $langs && git add $langs
+  fi
+  while read -r status path; do
+    [ "$status" = DU ] || continue
+    case "$path" in
+      launcher/src/glass*|launcher/src/partner.rs|launcher/src/themes*|launcher/src/frame.rs|launcher/src/sky.rs)
+        git rm -q -- "$path" ;;
+    esac
+  done < <(git status --porcelain | awk '{print $1" "$2}')
+}
+
 if ! git merge --no-commit --no-ff upstream/main >"$LOGS/merge.log" 2>&1; then
+  auto_resolve || true
+  if [ -n "$(git diff --name-only --diff-filter=U || true)" ]; then
   FILES="$(git diff --name-only --diff-filter=U || true)"
   git merge --abort 2>/dev/null || git reset --hard --quiet
   git checkout --quiet "$BASE"
@@ -89,6 +114,7 @@ if ! git merge --no-commit --no-ff upstream/main >"$LOGS/merge.log" 2>&1; then
   summary "### Upstream sync blocked: conflicts"; summary "$BODY"
   output result conflicts
   exit 0
+  fi
 fi
 
 # GITHUB_TOKEN cannot push changes to .github/workflows: keep ours, drop what upstream added there.
