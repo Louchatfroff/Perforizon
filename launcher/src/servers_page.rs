@@ -158,6 +158,30 @@ pub(super) struct Create {
 /// What the sidebar shows of the Servers page: its list once the page has read it, and whether
 /// a server answers.
 impl Servers {
+    /// A stopped server's line in the list: "Survival · stopped", as the mockup's. The open
+    /// server's mode is the one its settings show now, once read; the others' (and the open one's
+    /// until then) come from their files.
+    pub(super) fn stopped_line(&mut self, dir: &std::path::Path) -> String {
+        let open = Some(self.shown("world", "game_mode"))
+            .filter(|m| !m.is_empty() && self.open.as_deref() == Some(dir));
+        let mode = open.or_else(|| {
+            self.modes
+                .entry(dir.to_path_buf())
+                .or_insert_with(|| servers::game_mode(dir))
+                .clone()
+        });
+        match mode {
+            Some(mode) => {
+                let label = MODES
+                    .iter()
+                    .find(|(id, _)| *id == mode)
+                    .map_or(mode.clone(), |(_, label)| tr(label).to_string());
+                trf("{mode} · stopped", &[("mode", &label)])
+            }
+            None => tr("Stopped").to_string(),
+        }
+    }
+
     pub(super) fn sidebar_list(&self) -> Option<&[Entry]> {
         self.loaded.then_some(&self.list[..])
     }
@@ -173,6 +197,8 @@ pub(super) struct Servers {
     pub(super) open: Option<PathBuf>,
     tab: Tab,
     statuses: HashMap<PathBuf, Status>,
+    /// Each listed server's game mode from its `server.toml`, read once while it is listed.
+    modes: HashMap<PathBuf, Option<String>>,
     polling: bool,
     polled: Option<Instant>,
     log: VecDeque<String>,
@@ -225,6 +251,7 @@ impl Servers {
             open: None,
             tab: Tab::Overview,
             statuses: HashMap::new(),
+            modes: HashMap::new(),
             polling: false,
             polled: None,
             log: VecDeque::new(),
@@ -442,6 +469,8 @@ impl Launcher {
         }
         let s = &mut self.servers;
         s.open = Some(dir);
+        // Its settings may have changed while it was open.
+        s.modes.clear();
         s.tab = Tab::Overview;
         s.config = None;
         s.backups.clear();
@@ -580,6 +609,7 @@ impl Launcher {
                     Ok(entry) => {
                         s.create = None;
                         s.list = servers::list();
+                        s.modes.clear();
                         self.open_server(entry.dir.clone());
                         self.servers.note = Some(format!(
                             "{} is ready. Press Start, then give your friends the address below.",
@@ -605,6 +635,7 @@ impl Launcher {
                 s.busy = None;
                 s.confirm_delete = false;
                 s.list = servers::list();
+                s.modes.clear();
                 s.statuses.remove(&dir);
                 STARTED_HERE
                     .lock()
@@ -1116,6 +1147,7 @@ impl Launcher {
         let t = self.theme;
         if !self.servers.loaded {
             self.servers.list = servers::list();
+            self.servers.modes.clear();
             self.servers.loaded = true;
             if self.servers.open.is_none() && self.servers.list.len() == 1 {
                 let dir = self.servers.list[0].dir.clone();

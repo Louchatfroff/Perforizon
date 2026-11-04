@@ -458,7 +458,7 @@
   "Save choices": "Tallenna valinnat",
   "Relevance": "Relevanssi",
   "account checks": "tilitarkastukset",
-  "Settings, packs and Horizon mods go in; logs, screenshots, backups and your account never do. Worlds go without their per-player files.": "Asetukset, paketit ja Horizon-modit menevät sisään; lokit, kuvakaappaukset, varmuuskopiot ja tilisi eivät koskaan tee. Maailmat menevät ilman pelaajakohtaisia ​​tiedostoja.",
+  "Settings, packs and Horizon mods go in; logs, screenshots, backups and your account never do. Worlds go without their per-player files.": "Asetukset, paketit ja Horizon-modit menevät sisään; lokit, kuvakaappaukset, varmuuskopiot ja tilisi eivät koskaan tee. Maailmat menevät ilman pelaajakohtaisia tiedostoja.",
   "Packs": "Pakkaukset",
   "Unsigned": "Allekirjoittamaton",
   "Data packs": "Datapaketit",
@@ -889,5 +889,13 @@
   "select": "select",
   "palette": "palette",
   "Palette": "Palette",
-  "Nightly": "Nightly"
+  "Nightly": "Nightly",
+  "{mode} · stopped": "{mode} · pysähtynyt",
+  "My Horizon": "Oma Horizon",
+  "{count} on the official SMP": "{count} virallisella SMP:llä",
+  "What this change can't keep": "Mitä tämä muutos ei voi säilyttää",
+  "Save changes switches it. Nothing in its folder is deleted.": "Tallenna muutokset vaihtaa sen. Sen kansiosta ei poisteta mitään.",
+  "Its mods made for {loader} stay in its folder but won't load.": "Sen {loader}-modit jäävät sen kansioon, mutta niitä ei ladata.",
+  "Its mods made for Minecraft {from} stay in its folder; some may not load in {to}.": "Sen Minecraft {from} -modit jäävät sen kansioon; osa ei ehkä lataudu versiossa {to}.",
+  "Its worlds were saved by Minecraft {from}: {to} upgrades them for good, and can't open them if it is older.": "Sen maailmat on tallennettu Minecraft {from} -versiolla: {to} päivittää ne pysyvästi eikä voi avata niitä, jos se on vanhempi."
 }

@@ -130,9 +130,23 @@ impl Launcher {
         self.reload_instances();
     }
 
+    /// The instance the memory row sets: the one being edited while its dialog is open, else the
+    /// selected one.
+    fn memory_instance(&self) -> Option<instances::Instance> {
+        match self
+            .instances
+            .dialog
+            .as_ref()
+            .and_then(|d| d.editing.as_ref())
+        {
+            Some(id) => self.instances.list.iter().find(|i| &i.id == id).cloned(),
+            None => self.selected_instance().cloned(),
+        }
+    }
+
     /// The value under the pointer. Saving waits until the mouse comes up.
     fn pick_memory(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
-        let Some(instance) = self.selected_instance().cloned() else {
+        let Some(instance) = self.memory_instance() else {
             return;
         };
         let slider = &mut self.memory_slider;
@@ -159,7 +173,7 @@ impl Launcher {
         let Some(memory) = self.memory_slider.dragging.take() else {
             return;
         };
-        let Some(id) = self.selected_instance().map(|i| i.id.clone()) else {
+        let Some(id) = self.memory_instance().map(|i| i.id) else {
             return;
         };
         self.save_memory(&id, memory);

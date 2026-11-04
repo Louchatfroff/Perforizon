@@ -889,5 +889,13 @@
   "select": "select",
   "palette": "palette",
   "Palette": "Palette",
-  "Nightly": "Nightly"
+  "Nightly": "Nightly",
+  "{mode} · stopped": "{mode} · zastavené",
+  "My Horizon": "Môj Horizon",
+  "{count} on the official SMP": "{count} na oficiálnom SMP",
+  "What this change can't keep": "Čo táto zmena nedokáže zachovať",
+  "Save changes switches it. Nothing in its folder is deleted.": "Uložiť zmeny ju prepne. Z jej priečinka sa nič nezmaže.",
+  "Its mods made for {loader} stay in its folder but won't load.": "Jej módy pre {loader} zostanú v jej priečinku, ale nenačítajú sa.",
+  "Its mods made for Minecraft {from} stay in its folder; some may not load in {to}.": "Jej módy pre Minecraft {from} zostanú v jej priečinku; niektoré sa v {to} možno nenačítajú.",
+  "Its worlds were saved by Minecraft {from}: {to} upgrades them for good, and can't open them if it is older.": "Jej svety uložil Minecraft {from}: {to} ich natrvalo aktualizuje a ak je starší, nedokáže ich otvoriť."
 }

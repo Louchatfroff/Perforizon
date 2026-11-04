@@ -591,7 +591,7 @@
   "{name} is a Java modpack: importing it on the Modpacks page.": "{name} е Java modpack: импортирайте го на страницата Modpacks.",
   "Alpha": "Алфа",
   "Add mods": "Добавете модове",
-  "Upload this log to mclo.gs, a paste service for Minecraft logs? Anyone with the link can read it, until it is deleted or unread for 90 days. Your home folder, user name and account names are taken out first.": "Да се ​​качи ли този дневник в mclo.gs, услуга за поставяне на дневници на Minecraft? Всеки с връзката може да я прочете, докато не бъде изтрита или непрочетена за 90 дни. Вашата домашна папка, потребителско име и имена на акаунти се изваждат първо.",
+  "Upload this log to mclo.gs, a paste service for Minecraft logs? Anyone with the link can read it, until it is deleted or unread for 90 days. Your home folder, user name and account names are taken out first.": "Да се качи ли този дневник в mclo.gs, услуга за поставяне на дневници на Minecraft? Всеки с връзката може да я прочете, докато не бъде изтрита или непрочетена за 90 дни. Вашата домашна папка, потребителско име и имена на акаунти се изваждат първо.",
   "{count} lines, the game is running": "{count} реда, играта върви",
   "Move to trash": "Преместване в кошчето",
   "from GitHub: {source}": "от GitHub: {source}",
@@ -889,5 +889,13 @@
   "select": "select",
   "palette": "palette",
   "Palette": "Palette",
-  "Nightly": "Nightly"
+  "Nightly": "Nightly",
+  "{mode} · stopped": "{mode} · спряно",
+  "My Horizon": "Моят Horizon",
+  "{count} on the official SMP": "{count} в официалния SMP",
+  "What this change can't keep": "Какво не може да запази тази промяна",
+  "Save changes switches it. Nothing in its folder is deleted.": "„Запази промените“ го превключва. Нищо в папката му не се изтрива.",
+  "Its mods made for {loader} stay in its folder but won't load.": "Модовете му за {loader} остават в папката му, но няма да се зареждат.",
+  "Its mods made for Minecraft {from} stay in its folder; some may not load in {to}.": "Модовете му за Minecraft {from} остават в папката му; някои може да не се заредят в {to}.",
+  "Its worlds were saved by Minecraft {from}: {to} upgrades them for good, and can't open them if it is older.": "Световете му са записани от Minecraft {from}: {to} ги надгражда завинаги и не може да ги отвори, ако е по-стар."
 }

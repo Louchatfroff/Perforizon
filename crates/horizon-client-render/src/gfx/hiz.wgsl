@@ -18,7 +18,12 @@ const BOX_NEAR = 0.05;
 @group(0) @binding(6) var depth: texture_depth_2d;
 @group(0) @binding(8) var<storage, read> tests: array<vec4<u32>>;
 @group(0) @binding(10) var<storage, read_write> draws: array<u32>;
-@group(0) @binding(11) var<storage, read_write> rescue: array<vec4<u32>>;
+struct Rescued {
+    data: vec4<u32>,
+    low: vec4<f32>,
+    high: vec4<f32>,
+}
+@group(0) @binding(11) var<storage, read_write> rescue: array<Rescued>;
 @group(0) @binding(12) var<storage, read_write> args: array<atomic<u32>>;
 @group(0) @binding(13) var<storage, read> origins: array<vec4<f32>>;
 
@@ -194,5 +199,10 @@ fn cull(@builtin(global_invocation_id) id: vec3<u32>) {
         draws[(test.y + k) * 5u + 1u] = 0u;
     }
     let slot = atomicAdd(&args[1], 1u);
-    rescue[slot] = vec4(test.x, test.y + frame.counts.z, test.z, test.w);
+    let bounds = box_bounds(test.w);
+    rescue[slot] = Rescued(
+        vec4(test.x, test.y + frame.counts.z, test.z, 0u),
+        vec4(bounds[0], 0.0),
+        vec4(bounds[1], 0.0),
+    );
 }

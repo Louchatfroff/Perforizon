@@ -208,6 +208,7 @@ impl Fixture {
             T::Rgba8Unorm,
             World {
                 atlas: None,
+                material_maps: None,
                 lightmap,
                 terrain: None,
                 block_ids: &[],
@@ -434,6 +435,7 @@ fn fixture_frame(hud: &HudBatch) -> Frame<'_> {
         celestial: &[],
         stars: None,
         hand: &[],
+        hand_items: &[],
         hand_fov_degrees: 70.0,
         screen: &[],
         pack: Default::default(),

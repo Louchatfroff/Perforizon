@@ -507,8 +507,20 @@ pub(super) fn content(
     mask: bool,
     placeholder: &'static str,
 ) -> Div {
+    content_with(edit, t, focused, whole, mask, tr(placeholder).into())
+}
+
+/// [`content`] with a placeholder already translated (one with a value in it).
+pub(super) fn content_with(
+    edit: &LineEdit,
+    t: &theme::Theme,
+    focused: bool,
+    whole: bool,
+    mask: bool,
+    placeholder: gpui::SharedString,
+) -> Div {
     if edit.text.is_empty() && !focused {
-        return div().text_color(t.muted).child(tr(placeholder));
+        return div().text_color(t.muted).child(placeholder);
     }
     let (before, selected, after, caret_first) = edit.view(whole);
     let text = |s: String| {

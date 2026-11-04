@@ -133,7 +133,7 @@ impl Hiz {
             ),
             targets: None,
             tests: buffer(device, "Hi-Z tests", 16, STORAGE | DST),
-            rescue: buffer(device, "Hi-Z rescue", 16, STORAGE),
+            rescue: buffer(device, "Hi-Z rescue", 48, STORAGE),
             rescue_results: buffer(device, "Hi-Z rescue results", 4, STORAGE),
             args: buffer(
                 device,
@@ -218,7 +218,7 @@ impl Hiz {
         if n > self.capacity {
             self.capacity = n.next_power_of_two();
             self.tests = buffer(device, "Hi-Z tests", self.capacity * 16, STORAGE | DST);
-            self.rescue = buffer(device, "Hi-Z rescue", self.capacity * 16, STORAGE);
+            self.rescue = buffer(device, "Hi-Z rescue", self.capacity * 48, STORAGE);
             self.rescue_results = buffer(device, "Hi-Z rescue results", self.capacity * 4, STORAGE);
             self.groups = None;
         }

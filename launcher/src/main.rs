@@ -123,10 +123,11 @@ impl Page {
         (Page::Settings, "Settings", "sliders"),
     ];
 
-    /// The pages the top bar shows: all of them, the Wardrobe only with cosmetics on.
-    fn in_top_bar() -> impl Iterator<Item = (Page, &'static str, &'static str)> {
-        Self::ALL.into_iter().filter(|(page, ..)| match page {
-            Page::Wardrobe => horizon_cosmetics::enabled(),
+    /// The pages the top bar shows: all of them, the Wardrobe only when `wardrobe`
+    /// (`Launcher::wardrobe_shown`).
+    fn in_top_bar(wardrobe: bool) -> impl Iterator<Item = (Page, &'static str, &'static str)> {
+        Self::ALL.into_iter().filter(move |(page, ..)| match page {
+            Page::Wardrobe => wardrobe,
             _ => true,
         })
     }
@@ -192,6 +193,11 @@ struct Launcher {
     self_update: SelfUpdate,
     /// The Horizon version being installed as an update, and whether it becomes the selected one.
     update_install: Option<(String, bool)>,
+    /// The Horizon version being installed because an instance was made or saved to play it: it
+    /// becomes the launcher's version only when the launcher has none.
+    instance_install: Option<String>,
+    /// One for an instance waiting for the install running now to end.
+    install_next: Option<Release>,
     /// The install bar's previous and current fraction, so it moves rather than jumps.
     bar: (f32, f32),
     releases: Load<Vec<Release>>,
@@ -249,6 +255,12 @@ struct Launcher {
     wardrobe: Option<wardrobe_page::Wardrobe>,
     /// Ask the service again on the next draw of the Wardrobe (set by each visit).
     wardrobe_reload: bool,
+    /// The cosmetics service's last word on the founder set's claim (`GET /v1/shop`): whether
+    /// the top bar has the Wardrobe page with cosmetics off (`wardrobe_shown`).
+    shop_status: Option<horizon_launcher::wardrobe::Claim>,
+    /// The selected account's own answer on it from its last Wardrobe visit, kept on disk (a
+    /// preview the service grants it, its claim).
+    shop_kept: Option<horizon_launcher::wardrobe::Claim>,
     settings: Settings,
     /// The last failed settings write, kept across page changes until a save succeeds.
     settings_save_error: Option<String>,
@@ -456,6 +468,8 @@ impl Launcher {
             update_error: None,
             self_update: SelfUpdate::Idle,
             update_install: None,
+            instance_install: None,
+            install_next: None,
             bar: (0., 0.),
             releases: Load::Loading,
             installed,
@@ -484,6 +498,8 @@ impl Launcher {
             skin: None,
             wardrobe: None,
             wardrobe_reload: false,
+            shop_status: None,
+            shop_kept: None,
             args_input: line_edit::LineEdit::new(settings.game_args.clone(), 1024, 38),
             args_focused: false,
             args_focus: cx.focus_handle(),
@@ -599,6 +615,7 @@ impl Launcher {
         this.load_auth_statuses(true);
         this.fetch_startup_releases();
         this.fetch_links();
+        this.watch_shop(cx);
         if home::getting_ready_preview() {
             this.preparing = true;
             this.play_when_prepared = this.selected().cloned();
@@ -857,7 +874,7 @@ impl Launcher {
         match self.bench.as_mut().map(|b| b.tick(&self.perf)) {
             Some(perf::Step::Go(page)) => {
                 let pages: Vec<Page> = (Page::ALL.iter().map(|p| p.0))
-                    .filter(|p| *p != Page::Wardrobe || horizon_cosmetics::enabled())
+                    .filter(|p| *p != Page::Wardrobe || self.wardrobe_shown())
                     .collect();
                 self.go(pages[page % pages.len()]);
                 changed = true;
@@ -966,7 +983,7 @@ impl Launcher {
                     self.load_auth_statuses(false);
                     if let Some(tag) = self.starting_client.take() {
                         let mut cmd = backend::client_command(&tag);
-                        let (file, offline) = match session {
+                        let account::GameSession { file, offline, env } = match session {
                             Ok(pass) => pass,
                             Err(account::NoOwner) => {
                                 self.owner = Some(false);
@@ -985,6 +1002,7 @@ impl Launcher {
                         if let Some(file) = file {
                             cmd.arg("--session-file").arg(file);
                         }
+                        cmd.envs(env);
                         // Still play, offline, and say why.
                         if let Some(e) = offline {
                             self.client_error = Some(format!("Playing offline: {e}"));
@@ -1015,6 +1033,7 @@ impl Launcher {
                         };
                         if let Err(e) = profile {
                             self.client_error = Some(e);
+                            account::discard_unread_sessions();
                             continue;
                         }
                         if let Some(code) = self.joining.take() {
@@ -1046,8 +1065,14 @@ impl Launcher {
                                 self.client_run = run.map(|id| (id, Instant::now()));
                                 self.step_aside(cx);
                             }
-                            Err(e) => self.client_error = Some(e),
+                            Err(e) => {
+                                self.client_error = Some(e);
+                                account::discard_unread_sessions();
+                            }
                         }
+                    } else {
+                        // The start was called off: the sessions written for it go.
+                        account::discard_unread_sessions();
                     }
                 }
                 Msg::Progress(tag, p) => {
@@ -1059,6 +1084,7 @@ impl Launcher {
                     self.bar = (0., 0.);
                     self.installed = backend::installed();
                     let as_update = self.update_install.take().filter(|(t, _)| *t == tag);
+                    let for_instance = self.instance_install.take_if(|t| *t == tag).is_some();
                     if let (Ok(()), Some(started)) = (&result, self.install_started.take()) {
                         let name = if as_update.is_some() {
                             "launcher.update_ms"
@@ -1072,7 +1098,10 @@ impl Launcher {
                             if self.updates.horizon.as_ref().is_some_and(|r| r.tag == tag) {
                                 self.updates.horizon = None;
                             }
-                            if as_update.is_none_or(|(_, select)| select) {
+                            // An instance's own version leaves the other instances on theirs.
+                            let select = as_update.is_none_or(|(_, select)| select)
+                                && (!for_instance || self.launcher_version().is_none());
+                            if select {
                                 self.settings.selected = Some(tag);
                             }
                             // Pruning reads settings from disk: protect the selection only once
@@ -1085,6 +1114,9 @@ impl Launcher {
                             }
                         }
                         Err(e) => self.install_error = Some((tag, e)),
+                    }
+                    if let Some(next) = self.install_next.take() {
+                        self.install_for_instance(next);
                     }
                 }
                 Msg::Removed(tag, result) => {
@@ -1214,6 +1246,8 @@ impl Launcher {
                         }
                         Job::Client => {
                             self.client = None;
+                            // Any session file the game didn't read (it crashed first).
+                            account::discard_unread_sessions();
                             self.come_back(cx);
                             // The game saved: last played, sizes and pictures changed.
                             self.worlds.stale();
@@ -1344,6 +1378,19 @@ impl Launcher {
             .selected
             .as_ref()
             .filter(|s| self.installed.contains(s))
+    }
+
+    /// Installs `release` for an instance made or edited to play it, after the install running
+    /// now if there is one.
+    fn install_for_instance(&mut self, release: Release) {
+        match &self.installing {
+            Some((now, _)) if *now == release.tag => {}
+            Some(_) => self.install_next = Some(release),
+            None => {
+                self.instance_install = Some(release.tag.clone());
+                self.install(&release);
+            }
+        }
     }
 
     fn install(&mut self, release: &Release) {
@@ -1581,8 +1628,15 @@ impl Launcher {
             .or_else(|| self.installed.first())
             .map(|tag| backend::resources(tag))
             .unwrap_or_default();
+        // Offline names wear their own skin's face, or the default skin of their offline UUID.
+        let offline: Vec<String> = self
+            .players()
+            .into_iter()
+            .filter(|(who, _, _)| !matches!(who, account::Player::Microsoft(_)))
+            .map(|(_, name, _)| name)
+            .collect();
         self.profile_heads
-            .request(&self.accounts.accounts, resources, &self.tx);
+            .request(&self.accounts.accounts, &offline, resources, &self.tx);
     }
 
     fn begin_auth_job(&mut self, uuid: &str) -> Option<u64> {
@@ -2321,7 +2375,7 @@ impl Launcher {
             .overflow_hidden()
             .items_center()
             .gap(px(4.));
-        for (page, label, _) in Page::in_top_bar() {
+        for (page, label, _) in Page::in_top_bar(self.wardrobe_shown()) {
             nav = nav.child(
                 shell::tab(format!("nav-{label}"), tr(label), self.page == page, &t).on_click(
                     cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -2433,13 +2487,18 @@ impl Launcher {
             .py(px(10.));
         for e in servers {
             let up = self.servers.is_up(&e.dir);
+            let state = if up {
+                tr("Running").to_string()
+            } else {
+                self.servers.stopped_line(&e.dir)
+            };
             let open = self.page == Page::Servers && self.servers.open.as_ref() == Some(&e.dir);
             let dir = e.dir.clone();
             server_rows = server_rows.child(
                 shell::row(format!("side-server-{}", e.dir.display()), open, &t)
                     .child(shell::row_text(
                         e.name.clone(),
-                        tr(if up { "Running" } else { "Stopped" }).into(),
+                        state,
                         Some(if up { t.success } else { t.muted }),
                         open,
                         &t,
@@ -2704,6 +2763,11 @@ impl Launcher {
         else {
             // No hero without a version: the page starts below the top bar like the others.
             let memory = self.memory_row(cx);
+            // The first version, downloading since an instance was made to play it.
+            let waiting = match &self.installing {
+                Some((_, p)) => format!("{} {:.0}%", tr("Installing"), p * 100.),
+                None => tr("No version installed yet.").to_string(),
+            };
             return div()
                 .flex()
                 .flex_col()
@@ -2714,7 +2778,7 @@ impl Launcher {
                     "Start the game, or run a server for others to join.",
                     &t,
                 ))
-                .child(centered(tr("No version installed yet."), &t).child(
+                .child(centered(&waiting, &t).child(
                     button("go-versions", "Choose a version", Kind::Secondary, &t).on_click(
                         cx.listener(|this, _: &ClickEvent, _, cx| {
                             this.go(Page::Versions);
