@@ -107,7 +107,7 @@ if ! git merge --no-commit --no-ff upstream/main >"$LOGS/merge.log" 2>&1; then
       gh issue view "$NUM" --json body --jq .body | grep -q "$SHORT" || gh issue edit "$NUM" --body "$BODY" >/dev/null
       say "issue #$NUM updated"
     else
-      gh issue create --title "Upstream sync blocked: conflicts" --label upstream-sync --body "$BODY" >/dev/null
+      gh issue create --title "Upstream sync blocked: conflicts" --label upstream-sync --body "$BODY" >/dev/null \n        || gh issue create --title "Upstream sync blocked: conflicts" --body "$BODY" >/dev/null \n        || say "could not open the issue"
       say "issue opened"
     fi
   fi
@@ -213,7 +213,7 @@ if have_gh; then
   if [ -n "$NUM" ]; then
     gh pr edit "$NUM" --body "$BODY" >/dev/null
   else
-    gh pr create --base "$BASE" --head "$BRANCH" --title "Upstream sync: checks failed" --body "$BODY" >/dev/null
+    gh pr create --base "$BASE" --head "$BRANCH" --title "Upstream sync: checks failed" --body "$BODY" >/dev/null || say "could not open the PR"
   fi
 elif [ "$PUSH" = 0 ]; then
   say "dry run: would push $BRANCH and open a PR; branch kept locally"
