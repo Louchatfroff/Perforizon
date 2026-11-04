@@ -15,7 +15,7 @@ own copy of Minecraft Java 26.3 as usual.
 
 ## The quick way: the script
 
-[`tools/use-with-horizon-launcher.ps1`](../tools/use-with-horizon-launcher.ps1) does everything below and can undo it. Read it first, it is short.
+[`tools/use-with-horizon-launcher.ps1`](https://github.com/Louchatfroff/Perforizon/blob/main/tools/use-with-horizon-launcher.ps1) does everything below and can undo it. Read it first, it is short.
 
 ```powershell
 irm https://raw.githubusercontent.com/Louchatfroff/Perforizon/main/tools/use-with-horizon-launcher.ps1 -OutFile $env:TEMP\use-perforizon.ps1
