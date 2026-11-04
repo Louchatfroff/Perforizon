@@ -36,5 +36,6 @@
 # Release-only compiled original exporter bundle.
 /exporters/
 
-# Wiki build output
+# Release-only compiled original exporter bundle.
+/exporters/
 /wiki/_site/
