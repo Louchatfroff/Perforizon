@@ -3,167 +3,191 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Minecraft-Java%2026.3-5D9C3F" alt="Minecraft Java 26.3">
-  <img src="https://img.shields.io/badge/Rust-stable-B7410E?logo=rust&logoColor=white" alt="Rust">
-  <img src="https://img.shields.io/badge/vanilla%20parity-100%25-F0795A" alt="Vanilla parity 100%">
-  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-2A2470" alt="Linux, macOS and Windows">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-3B2F7E" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/Minecraft-Java%2026.3-555555" alt="Minecraft Java 26.3">
+  <img src="https://img.shields.io/badge/Rust-stable-555555" alt="Rust">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-555555" alt="MIT license"></a>
+  <a href="https://github.com/Louchatfroff/Perforizon/releases/tag/v0.1.0"><img src="https://img.shields.io/badge/release-v0.1.0-555555" alt="Release v0.1.0"></a>
 </p>
 
-<p align="center">
-  <a href="https://github.com/Louchatfroff/Perforizon"><b>GitHub</b></a> ·
-  <a href="#download"><b>Download</b></a> ·
-  <a href="https://playhorizon.dev/docs/"><b>Documentation</b></a> ·
-  <a href="https://github.com/Louchatfroff/Perforizon/releases"><b>Releases</b></a> ·
-  <a href="ROADMAP.md"><b>Roadmap</b></a> ·
-  <a href="#project-status"><b>Project status</b></a> ·
-  <a href="#contributing"><b>Contributing</b></a>
-</p>
-
-# Perforizon
-
-A performance fork of Horizon: same worlds, same world generation (bit-identical), faster frames and lower input latency. At render distance 32 on an RTX 4060 Ti it averages +5% to +44% fps over Horizon with default settings (up to +107% in forest and ocean once the auto-tune enables Far LOD), and has better 1% and 0.1% lows in every benchmark scene ([benchmarks](docs/perforizon-benchmarks.md)). It adds an in-game **Auto-tune**, an Optimization Mode (Performance or 100% parity), more antialiasing modes and a PvP module.
-
-- [Install and use the Auto-tune](docs/perforizon-autotune.md)
-- [Patch notes](docs/perforizon-patchnotes.md) · [Technical details](docs/perforizon-technical.md) · [Installing and releasing](docs/perforizon-install.md)
-
-Recorded in the game at 1920x1080, render distance 16, VSync off: the frame counter and the input-to-screen latency counter (`latencyHud`) are in the corner, with the small direction panel of the PvP module at top left.
-
-<table>
-  <tr>
-    <td width="50%"><img src="docs/media/game-village.webp" alt="A river valley seen from above in Perforizon, with the frame counter and the input-to-screen latency in the corner"></td>
-    <td width="50%"><img src="docs/media/game-forest.webp" alt="A forest in Perforizon, with the frame counter and the input-to-screen latency in the corner"></td>
-  </tr>
-  <tr>
-    <td colspan="2"><img src="docs/media/game-ocean.webp" alt="An ocean coast in Perforizon, with the frame counter and the input-to-screen latency in the corner"></td>
-  </tr>
-</table>
-
-The launcher has a terminal look: grayscale by default, with other palettes (Tokyo Night, Catppuccin and more) on `^p` or in Settings.
-
-<table>
-  <tr>
-    <td width="50%"><img src="docs/media/launcher-home.png" alt="The launcher's Home page in the default grayscale palette"></td>
-    <td width="50%"><img src="docs/media/launcher-tokyo-night.png" alt="The launcher's Home page in the Tokyo Night palette"></td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="docs/media/launcher-mods.png" alt="The launcher's Mods page"></td>
-    <td width="50%"><img src="docs/media/launcher-catppuccin-mocha.png" alt="The launcher's Settings page in the Catppuccin Mocha palette"></td>
-  </tr>
-</table>
-
-Everything below is Horizon's README, kept for reference; the Perforizon fork is at <https://github.com/Louchatfroff/Perforizon>.
-
-# Horizon
-
-Minecraft: Java Edition 26.3, rewritten in Rust. Same worlds, same rules, same terrain, checked against the Java game by more than 300 differential harnesses. Free, open source and unofficial.
-
-> Not an official Minecraft product, nor approved by or associated with Mojang or Microsoft. Horizon contains no Minecraft code, assets or data: you need your own copy of Java Edition 26.3.
-
-## Download
-
-Get **the Horizon launcher** from [playhorizon.dev](https://playhorizon.dev) or [the launcher releases](https://github.com/horizon-rust/horizon/releases?q=launcher-v&expanded=true) (Linux x86-64, macOS on Apple Silicon, macOS on Intel from the next Nightly, Windows x64). It installs and updates the game, prepares its files from your copy of Minecraft, and updates itself.
-
-**You need** a Microsoft account that owns Java Edition ([why](docs/microsoft-account.md)) and a GPU with Vulkan or OpenGL 3.3 (Linux), Vulkan or DirectX 12 (Windows), or a Mac (Apple Silicon, or Intel from the next Nightly). An existing Minecraft install (official launcher, Prism, MultiMC...) is reused; without one, Play downloads 26.3 from Mojang for your account. Step by step: [Install and first launch](https://playhorizon.dev/docs/install).
-
-## What works today
-
-- **The game:** vanilla world generation, mobs, villagers, raids, redstone, every command, the HUD and the recipe book, on vanilla saves. Worlds from 1.8 to 26.2 are upgraded. [Status](#project-status).
-- **Extras:** new menus, graphics presets, distant terrain up to 1024 chunks, controllers, zoom, minimap and more, off by default where they change the vanilla look. [Settings](https://playhorizon.dev/docs/settings).
-- **Packs:** resource packs, and data packs with functions, predicates, item modifiers and world generation.
-- **Multiplayer:** invite friends with a code, Open to LAN, join servers (online mode included). [Multiplayer](https://playhorizon.dev/docs/multiplayer).
-- **Mods:** content mods (blocks, items, data) and native Rust mods, built by the launcher with nothing to install. Java mod jars do not run. [Mods](https://playhorizon.dev/docs/mods).
-
-## Host a server
-
-The launcher's **Servers** page creates, starts, backs up and updates a server, and invites friends over Tailscale. On a VPS, `horizon-server` installs with one command and needs no Java. [Host a server](https://playhorizon.dev/docs/hosting) ([reference](docs/hosting.md)).
-
-## Modpacks
-
-The launcher imports Modrinth and CurseForge packs and plays the mods Horizon can carry over: today, content mods made of data and assets, not Java code. [Modpacks](https://playhorizon.dev/docs/modpacks).
-
-## Agent control
-
-AI agents and scripts can play Horizon. `horizon-ctl`, shipped with the game, reads its state as JSON and acts like a player; `horizon-ctl mcp` serves the same commands over MCP.
-
-```sh
-horizon-ctl launch --world Survival --seed 5 --wait   # finds the version the launcher installed
-horizon-ctl state                                       # position, health, food, target, screen...
-horizon-ctl find-block birch_log                        # the nearest logs
-horizon-ctl goto -0.5 65 -2.5 --near 2.5                # walks there along a path
-horizon-ctl break -1 65 -3                              # mines it; replies with the drops
-horizon-ctl open-inventory && horizon-ctl click-slot 0  # menus: slots, buttons by label, text fields
+```
+P E R F O R I Z O N
+> Horizon, tuned for frame rate and input latency
 ```
 
-Commands block until done and reply with the result; `horizon-ctl help` lists them all. [Agent control](docs/native-client.md#agent-control-horizon-ctl-and-mcp).
+Perforizon is a performance fork of [Horizon](https://github.com/horizon-rust/horizon), Minecraft: Java Edition 26.3 rewritten in Rust (wgpu). It keeps Horizon's worlds and world generation identical and goes after frame rate, frame-time spikes and input-to-screen latency. It adds an in-game auto-tune, a choice between a Performance and a 100% parity mode, extra antialiasing modes, a latency counter and a PvP module.
+
+Perforizon is unofficial and is not affiliated with Mojang or Microsoft. It does not include Minecraft: you need your own copy of Minecraft Java 26.3, from which the game files are prepared on your machine. Perforizon is based on Horizon (MIT).
+
+```
+[ Install ]  [ Auto-tune ]  [ Wiki ]  [ Releases ]
+  windows x64 only for now, signed releases
+```
+
+[Install](#install) | [Auto-tune](#auto-tune-in-3-steps) | [Wiki](https://louchatfroff.github.io/Perforizon/) | [Releases](https://github.com/Louchatfroff/Perforizon/releases) | [Build](#build-from-source)
+
+## Why Perforizon
+
+Measured against Horizon built the same way, default settings, render distance 32, `--benchmark standard` (seed 1234, offscreen 1280x720, VSync off, simulation distance 12), RTX 4060 Ti, average of 3 runs:
+
+| Scene | Horizon fps | Perforizon fps | Change | 1% low change |
+| --- | ---: | ---: | ---: | ---: |
+| village | 1214 | 1278 | +5% | +16% |
+| forest | 943 | 1362 | +44% | +35% |
+| ocean | 1121 | 1410 | +26% | +26% |
+| mountain | 860 | 914 | +6% | +24% |
+
+Caveats, stated plainly:
+
+- One machine, one GPU, offscreen 720p. Read it as a comparison between two builds, not as a promise for your hardware.
+- The Far LOD option (distant terrain with coarser tiles) is not a free win. At render distance 32 it adds +107% in forest and ocean and +26% in mountain, but costs 13% in village, and at render distance 16 it is level or slower. It changes pixels (flatter distant trees) and is off by default; the auto-tune keeps it only if it helps on your machine.
+- Full tables (render distance 16 and 32, auto-tuned column, 1% and 0.1% lows): [docs/perforizon-benchmarks.md](docs/perforizon-benchmarks.md).
+
+## Features
+
+```
+> defaults        on for everyone, no setup
+> opt-in          off by default, the auto-tune decides
+> modes           performance | parity
+```
+
+**On by default**
+- 20-byte terrain vertex (was 24), greedy meshing including water, solid distant leaves (`leafDistance`), tighter occlusion boxes, a lighter terrain vertex shader.
+- Fewer CPU spikes: lower-priority worker threads, chunk freeing on its own thread, mesher allocation fixes.
+- Cave culling, entity culling and a shadow cache.
+
+**Opt-in GPU options (the auto-tune decides)**
+- Far LOD (`farLodCoarse` with `farTerrainDistance`), vertex pool, binary greedy meshing, mesh shaders, Hi-Z occlusion, BC7 texture compression, shadow GPU culling, GPU particles.
+- On the reference GPU only Far LOD paid off; the others showed no gain or were within noise, so they stay off there. Other GPUs may differ. Details: [docs/perforizon-technical.md](docs/perforizon-technical.md).
+
+**Optimization Mode**
+- `Performance` (default): allows optimizations that change a few pixels.
+- `100% parity`: turns those off so the picture matches Horizon's; only lossless speedups stay.
+
+**Latency and antialiasing**
+- Input-to-screen latency counter (`latencyHud`), `presentMode` and `frameLatency` picked by the auto-tune, optional packet batching and pipeline cache.
+- Antialiasing: FXAA, TAA, SMAA, CMAA2, plus FSR scaling.
+
+**PvP module** (`Options > Horizon > PvP`)
+- Hit prediction, crystal and anchor optimizers, elytra stop. Prediction is not tested on a live server yet.
+- Small HUD overlays (armor, effects, coordinates, direction, ping, combo, reach, items), hitboxes, projectile trails, toggle sprint and sneak.
+
+**Launcher**
+- Terminal-style launcher with 16 palettes (default Grayscale), no ads. It installs and updates Perforizon releases and verifies their signature.
+
+Release notes: [docs/perforizon-patchnotes.md](docs/perforizon-patchnotes.md).
+
+## Screenshots
+
+Game:
+
+<p align="center">
+  <img src="docs/media/game-forest.webp" alt="Forest" width="32%">
+  <img src="docs/media/game-ocean.webp" alt="Ocean" width="32%">
+  <img src="docs/media/game-village.webp" alt="Village" width="32%">
+</p>
+
+Launcher:
+
+<p align="center">
+  <img src="docs/media/launcher-home.png" alt="Launcher home" width="48%">
+  <img src="docs/media/launcher-settings.png" alt="Launcher settings" width="48%">
+</p>
+<p align="center">
+  <img src="docs/media/launcher-versions.png" alt="Launcher versions" width="48%">
+  <img src="docs/media/launcher-patch-notes.png" alt="Launcher patch notes" width="48%">
+</p>
+
+## Install
+
+Windows x64 only. PowerShell, no admin rights:
+
+```powershell
+irm https://raw.githubusercontent.com/Louchatfroff/Perforizon/main/packaging/windows/install-perforizon.ps1 | iex
+```
+
+It downloads the latest `Perforizon-windows-x64.zip`, checks it against the release's `SHA256SUMS`, unpacks to `%LOCALAPPDATA%\Perforizon` and adds a Start Menu shortcut.
+
+Or download the zip from the [Releases page](https://github.com/Louchatfroff/Perforizon/releases) and unzip it by hand.
+
+How releases are verified:
+- Every release ships `SHA256SUMS` and a signature, `SHA256SUMS.sig`.
+- The launcher checks that signature against the keys in `crates/horizon-release-sign/release-keys.txt`. The one-line installer only checks the checksum, not the signature; to authenticate a manual install, compare the SHA-256 it prints with the one published by the author.
+
+Prepare the game files from your own copy of Minecraft Java 26.3, as for Horizon (see `PLAY.txt` in the install folder):
+
+```
+horizon-prepare.exe --prepare --server-jar <your server.jar>
+```
+
+More: [docs/perforizon-install.md](docs/perforizon-install.md).
+
+## Auto-tune in 3 steps
+
+1. Open a creative or single-player world and stand where you normally play, at your usual render distance.
+2. `Options > Video Settings > Advanced Graphics > Auto-tune > Run Auto-tune...` (about two minutes). For a slower, more careful run on the four benchmark scenes, use `Run Precise Auto-tune...` (about 30 minutes on the reference machine).
+3. Done: the result is saved to your graphics options. Run it again after changing render distance, GPU or shader pack.
+
+Command line equivalent: `horizon-ctl autotune`, `horizon-ctl autotune --precise`. Full guide: [docs/perforizon-autotune.md](docs/perforizon-autotune.md).
+
+## Settings cheat sheet
+
+Under `Options > Video Settings > Advanced Graphics`; `horizon-ctl graphics KEY VALUE` sets them live.
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `optimizationMode` | `performance` | `parity` disables the pixel-changing optimizations |
+| `greedyMeshing` | on | Merges coplanar faces, water included |
+| `leafDistance` | 5 | Chunks within which leaves stay fancy; solid beyond. `0` = fancy everywhere |
+| `farTerrainDistance` | 0 (off) | Earlier handoff to distant-terrain tiles |
+| `farLodCoarse` | off | Coarser distant tiles; changes pixels |
+| `caveCulling`, `entityCulling`, `shadowCache` | on | Lossless or near-lossless |
+| `meshShaders` | off | Faster on some GPUs, slower on the RTX 4060 Ti tested |
+| `vertexPool` | off | One large terrain buffer instead of several |
+| `hizOcclusion` | off | Same pixels; a loss on the reference GPU |
+| `textureCompression` | off | BC7 block sprites; lossy |
+| `presentMode` | auto | Auto-tune also tries `mailbox` (VSync off only) |
+| `frameLatency` | 0 (auto) | Queued frames |
+| `latencyHud` | off | Shows input-to-screen delay in the PvP HUD |
+| Antialiasing | none | FXAA, TAA, SMAA, CMAA2 |
+
+All options and their measured effects: [docs/perforizon-autotune.md](docs/perforizon-autotune.md).
+
+## Keeping up with Horizon
+
+Perforizon follows upstream Horizon automatically: it checks hourly for new upstream commits and merges them in only when all checks pass; otherwise it opens an issue or a pull request for a human to look at. Details: [docs/perforizon-sync.md](docs/perforizon-sync.md).
+
+## Wiki
+
+A terminal-style wiki (same look as the launcher) lives at <https://louchatfroff.github.io/Perforizon/>.
 
 ## Build from source
 
-Needs Rust 1.90+, Python 3.10+, JDK 25, and on Linux `libasound2-dev libudev-dev`. `horizon-prepare` builds the game's resources from **your own copy** of Java Edition 26.3 (checked against `research-lock.json`) and never downloads it:
-
-1. **Client:** play 26.3 once in the official launcher. Horizon reads `~/.minecraft` (or `--minecraft-dir` / `HORIZON_MINECRAFT_DIR`).
-2. **Server jar:** the 26.3 server jar (`downloads.server.url` in `versions/26.3/26.3.json`), passed once with `--server-jar` or `HORIZON_SERVER_JAR`.
+Needs Rust 1.90+ and, for preparing game files, Python 3.10+ and JDK 25. Windows x64 is the packaged target.
 
 ```sh
-git clone https://github.com/horizon-rust/horizon.git
-cd horizon
-cargo run --release -p horizon-prepare -- --prepare --server-jar ~/Downloads/server.jar   # needs JDK 25
-cargo run --release -p horizon-prepare -- sounds   # optional: sounds from your launcher install
-cargo run --release -p horizon-client
+git clone https://github.com/Louchatfroff/Perforizon.git
+cd Perforizon
+cargo build --profile fast -p horizon-client
 ```
 
-Prepared files land in the gitignored `.local/`: never commit or share them. Options, controls and architecture: [the native client guide](docs/native-client.md); all developer docs: [docs/README.md](docs/README.md).
+Release build and Windows package (writes `dist\Perforizon-windows-x64.zip` and `dist\SHA256SUMS`):
 
-## Roadmap
-
-What is in progress, what comes next and where to help: [ROADMAP.md](ROADMAP.md), or [playhorizon.dev/hub](https://playhorizon.dev/hub) with the work board and what shipped.
-
-## Contributing
-
-Issues and pull requests are welcome: read [CONTRIBUTING.md](CONTRIBUTING.md) (vanilla first, small pull requests). Questions: [Discord](https://discord.gg/playhorizon). Before a pull request, run the self-check and paste its output:
-
-```sh
-git config core.hooksPath .githooks
-python3 tools/pr_ready.py
+```powershell
+tools\package_windows.ps1                 # release profile; -Profile fast for a quick build
 ```
 
-It runs rustfmt, clippy, the touched crates' tests, the Python tests, the public-tree check and the vanilla harnesses your change affects. Never commit game files, decompiled source or prepared resources.
+The launcher is its own workspace: `cd launcher && cargo build --release --locked`. Never commit Mojang's files (jars, assets, prepared resources); see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Project status
+## Contributing and issues
 
-**Player-visible gaps: 833 open** of the 833 the [port ledger](tools/port_ledger.py) found, reading every vanilla 26.3 method against Horizon's code: vanilla behaviour a player would notice that Horizon doesn't have yet. By area: Screens, HUD and client packets [197](https://github.com/horizon-rust/horizon/issues/3518); Entity and block rendering, models [129](https://github.com/horizon-rust/horizon/issues/3519); Animals [110](https://github.com/horizon-rust/horizon/issues/3512); Server and players on the server [106](https://github.com/horizon-rust/horizon/issues/3520); Blocks, redstone and fluids [86](https://github.com/horizon-rust/horizon/issues/3516); Entities, projectiles, vehicles and decorations [64](https://github.com/horizon-rust/horizon/issues/3514); Monsters and bosses [53](https://github.com/horizon-rust/horizon/issues/3513); Mob AI, villagers and raids [35](https://github.com/horizon-rust/horizon/issues/3521); World, world generation and saves [32](https://github.com/horizon-rust/horizon/issues/3517); Items, enchantments and inventories [21](https://github.com/horizon-rust/horizon/issues/3515). This number goes down as gaps close (`tools/parity_gaps.py`); the harness results below say that what is tested matches.
+GitHub Issues are currently disabled on this repository. For now, contact the repository owner (Louchatfroff) through GitHub. Read [CONTRIBUTING.md](CONTRIBUTING.md) before sending code; changes that are not Perforizon-specific are better sent to [Horizon](https://github.com/horizon-rust/horizon).
 
-The table is the project's own audit: every subsystem matches vanilla in every harness that compares it. 100% means 100% of what the harnesses compare, not that nothing else differs.
+## Credits and licenses
 
-### Java parity: 100%
+- **Horizon** by Ludovic Marie and the Horizon contributors, MIT: the base of this project. <https://github.com/horizon-rust/horizon>
+- **Perforizon** changes are MIT too. See [LICENSE](LICENSE).
+- **Geist Mono** (launcher and wiki font) by Vercel, SIL Open Font License; text in `crates/horizon-theme/fonts/OFL-Geist.txt`.
+- **CMAA2** antialiasing is a WGSL/wgpu port of Intel CMAA2 (Copyright 2018 Intel Corporation, Filip Strugar), Apache License 2.0; see [the notice](crates/horizon-client-render/src/gfx/aa/cmaa2.NOTICE).
+- Other third-party code (AMD FidelityFX SDK ports and more): [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-Scores: 0 (absent), 0.25 (started), 0.5 (playable, major features missing), 0.75 (mostly complete) or 1 (complete and verified by differential tests); the percentage is their average. Last audited 2026-10-13: all 281 harnesses pass on Linux and macOS. The [port ledger](tools/port_ledger.py) adds a method-by-method view of what is ported.
-
-| Subsystem | Score | Main gaps |
-| --- | ---: | --- |
-| Window, input and game loop | 1 | None: game loop, options, camera, auto-jump, toggle sprint/sneak and frame limiter match |
-| Assets and resources | 1 | None: item models match over 196,290 stacks; the resource pack screen over 3,000 sessions |
-| Network protocol and multiplayer | 1 | None: joins vanilla servers; the dedicated server matches vanilla's files, login, configuration, play and command tree; LAN discovery over 462 cases (offline mode only) |
-| Chunk storage and palettes | 1 | None: client and saves share paletted containers, identical to vanilla over 266 scenarios |
-| Section meshing | 1 | None: 112 scenes and over a million quads identical to vanilla |
-| Rendering | 1 | None: entity models, block entity renderers (407 cases) and animations (296), HUD overlays (2,200 states), the recipe book (600), player list, subtitles and world border match |
-| Lighting | 1 | None: saved and relit light matches vanilla, slabs and stairs included |
-| World generation | 1 | None: 2,352 whole chunks over 225 structure sites, in all three dimensions, identical to vanilla |
-| Region files and saves | 1 | None: saves round-trip with vanilla; worlds from 1.8 to 26.2 upgrade as vanilla's DataFixers do |
-| Entities and physics | 1 | None: attributes, spawn rules, natural spawning (15,500 cases), raids and patrols (1,900), `finalizeSpawn` (24,000) and mob AI (92 scenarios) match |
-| Interaction and inventory | 1 | None: menu clicks over 8,000 sequences; recipe book placement (6,000), buttons (1,200), saved book (1,500), loom and crafter screens (1,600) |
-| Menus, HUD and chat | 1 | None: every command (758 over 39,685 inputs), scoreboards (81,000 operations), the player list (872,000 draw calls), chat and its suggestions (3,000 sessions) match |
-| Audio | 1 | None: the sound engine, sound events, music, situational music, ambience and subtitles match vanilla |
-| Block behaviours and ticking | 1 | None: block updates, random ticks, redstone, dispensers (6,000 cases), crafters (4,000), container spills (4,000), copper golems and the sculk family (435 scenarios) match |
-
-### Known issues
-
-Skins served over https show the default skin unless already cached; pack icons show the unknown-pack texture in game; item tooltips lack attribute lines.
-
-## Licence
-
-[MIT](LICENSE), for the project's original work; dependencies keep their own licences ([notices](THIRD_PARTY_NOTICES.md)). Minecraft is a trademark of Mojang Synergies AB; its code and assets belong to Mojang and Microsoft under the [Minecraft EULA](https://www.minecraft.net/en-us/eula).
-
-## Author
-
-Made by [Ludovic Marie](https://lu4ovic.com) ([@ludovic111](https://github.com/ludovic111)).
+Minecraft is a trademark of Mojang Studios / Microsoft. Perforizon is not affiliated with them and ships none of their files.

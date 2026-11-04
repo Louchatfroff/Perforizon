@@ -1,0 +1,66 @@
+name: upstream-sync
+# Merges horizon-rust/horizon main into this fork's main when the merge is clean and every check passes
+# (tools/ci/upstream_sync.sh, docs/perforizon-sync.md). Conflicts open one issue, failed checks open a PR.
+# Never builds or publishes a release.
+#   gh workflow run upstream-sync -f dry_run=true     # merge and check, push nothing
+#   gh workflow run upstream-sync -f force=true       # redo a sync whose sync/upstream-<sha> branch already exists
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Merge and check, but push nothing
+        type: boolean
+        default: false
+      force:
+        description: Redo a sync whose branch already exists
+        type: boolean
+        default: false
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+env:
+  # Test runs never reach the telemetry server (docs/telemetry.md), as in ci.yml.
+  HORIZON_TELEMETRY_URL: "off"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install the ALSA and udev headers the client links against, and the ones GPUI links against
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev \
+            libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libvulkan-dev
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+      # Same cache keys as ci.yml's verify job; the launcher is its own workspace.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: verify
+          workspaces: |
+            . -> target
+            launcher -> target
+      - name: Merge upstream and run the checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SYNC_FORCE: ${{ inputs.force && '1' || '0' }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+        run: |
+          if [ "$DRY_RUN" = 1 ]; then bash tools/ci/upstream_sync.sh --no-push; else bash tools/ci/upstream_sync.sh; fi
